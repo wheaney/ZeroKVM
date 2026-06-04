@@ -142,7 +142,16 @@ internal static class DlDecoder
                         commandLength = ProcessOther(header, ref streamStart, ref commandStart, ref streamEnd, memory);
                         if (commandLength < 0)
                         {
-                            return commandStream.Length;
+                            // Discard the full packet and resync: scan forward to the next 0xaf
+                            // byte (first byte of every valid command) rather than discarding
+                            // all remaining bytes.  Unknown headers from dropped/corrupt USB
+                            // packets are followed by real commands within the same buffer.
+                            stream = ref Unsafe.Add(ref stream, 1);
+                            while (Unsafe.ByteOffset(ref stream, ref streamEnd) >= 2 && stream != CommandHeader)
+                            {
+                                stream = ref Unsafe.Add(ref stream, 1);
+                            }
+                            continue;
                         }
 
                         break;
