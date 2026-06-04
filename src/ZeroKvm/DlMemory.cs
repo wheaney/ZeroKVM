@@ -51,6 +51,25 @@ internal class DlMemory
     private int _dirtyByteMin = int.MaxValue;
     private int _dirtyByteMax = int.MinValue;
 
+    /*
+     * Mark dirty from an 8-bit plane address by mapping it to the equivalent
+     * row in the 16-bit plane.  8-bit plane addresses have a different base
+     * (_fb8BaseOffset) and stride (_fb8LineStride) than the 16-bit plane, so
+     * passing them directly to MarkDirty corrupts the dirty-row range.
+     */
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void MarkDirty8(int byteAddress8, int pixelCount)
+    {
+        int lineStride8 = _fb8LineStride;
+        int lineStride16 = _fb16LineStride;
+        if (lineStride8 <= 0 || lineStride16 <= 0) return;
+        int pixelOffset = byteAddress8 - _fb8BaseOffset;
+        if (pixelOffset < 0) return;
+        int row = pixelOffset / lineStride8;
+        int col  = pixelOffset % lineStride8;
+        MarkDirty(_fb16BaseOffset + row * lineStride16 + col * sizeof(ushort), pixelCount * sizeof(ushort));
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
     {
