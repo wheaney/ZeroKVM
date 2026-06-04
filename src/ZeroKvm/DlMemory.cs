@@ -303,42 +303,74 @@ internal class DlMemory
         int rowFirst = Math.Max(0, dirtyRowFirst);
         int rowLast  = Math.Min(totalRows, dirtyRowLast);
         int vectorLineLength = lineStride - (lineStride % Vector128<ushort>.Count);
+        bool hasDirtyRows = dirtyRowFirst > 0 || dirtyRowLast < int.MaxValue;
         for (int y = rowFirst; y < rowLast; y++)
         {
             int i = y * lineStride;
             ref uint lineDestinationRef = ref Unsafe.Add(ref destinationRef, y * destinationStride);
-            (int lineX1, int lineX2) = CopyLine16(
-                ref Unsafe.Add(ref sourceRef, i),
-                ref Unsafe.Add(ref sourceDiffRef, i),
-                ref lineDestinationRef,
-                lineStride,
-                vectorLineLength);
 
-            if (lineX1 >= 0)
+            if (hasDirtyRows)
             {
-                if (lineX1 < x1)
-                {
-                    x1 = lineX1;
-                }
+                /*
+                 * We already know this row was written by the decoder (MarkDirty
+                 * confirmed it). Skip the per-pixel diff comparison and convert
+                 * unconditionally — faster for large dirty regions (e.g. a window
+                 * being dragged) where nearly every pixel changed anyway.
+                 */
+                CopyLine16Full(
+                    ref Unsafe.Add(ref sourceRef, i),
+                    ref Unsafe.Add(ref sourceDiffRef, i),
+                    ref lineDestinationRef,
+                    lineStride,
+                    vectorLineLength);
 
-                if (lineX2 > x2)
-                {
-                    x2 = lineX2;
-                }
+                if (y2 == 0) { y1 = y; y2 = y + 1; } else { y2 = y + 1; }
+                x1 = 0;
+                x2 = lineStride;
+            }
+            else
+            {
+                (int lineX1, int lineX2) = CopyLine16(
+                    ref Unsafe.Add(ref sourceRef, i),
+                    ref Unsafe.Add(ref sourceDiffRef, i),
+                    ref lineDestinationRef,
+                    lineStride,
+                    vectorLineLength);
 
-                if (y2 == 0)
+                if (lineX1 >= 0)
                 {
-                    y1 = y;
-                    y2 = y + 1;
-                }
-                else
-                {
-                    y2 = y + 1;
+                    if (lineX1 < x1) x1 = lineX1;
+                    if (lineX2 > x2) x2 = lineX2;
+                    if (y2 == 0) { y1 = y; y2 = y + 1; } else { y2 = y + 1; }
                 }
             }
         }
 
         return (x1, y1, x2, y2);
+    }
+
+    /*
+     * Unconditionally convert all pixels in one line, updating the diff buffer
+     * as a side-effect.  Used for rows we already know changed (dirty rows from
+     * MarkDirty), so the comparison in CopyLine16 is redundant there.
+     */
+    private static void CopyLine16Full(ref ushort source, ref ushort sourceDiff, ref uint destination, int lineLength, int vectorLineLength)
+    {
+        ref Vector256<uint> dst = ref Unsafe.As<uint, Vector256<uint>>(ref destination);
+        int x = 0;
+        for (; x < vectorLineLength; x += Vector128<ushort>.Count)
+        {
+            Vector128<ushort> pixels = Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref source, x));
+            Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref sourceDiff, x)) = pixels;
+            ColorConvert.Rgb565LeToRgbx(pixels, ref Unsafe.Add(ref dst, x / Vector128<ushort>.Count));
+        }
+        if (lineLength != vectorLineLength)
+        {
+            nuint offset = (nuint)Vector128<ushort>.Count - (nuint)(lineLength - vectorLineLength);
+            Vector128<ushort> pixels = Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref source, x - (int)offset));
+            Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref sourceDiff, x - (int)offset)) = pixels;
+            ColorConvert.Rgb565LeToRgbx(pixels, ref Unsafe.As<uint, Vector256<uint>>(ref Unsafe.Add(ref destination, lineLength - Vector256<uint>.Count)));
+        }
     }
 
     private static (int X1, int X2) CopyLine16(ref ushort source, ref ushort sourceDiff, ref uint destination, int lineLength, int vectorLineLength)
