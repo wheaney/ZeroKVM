@@ -37,10 +37,11 @@ internal static class DlDecoder
         ref byte stream = ref streamStart;
         ref byte streamEnd = ref Unsafe.Add(ref stream, commandStream.Length);
         ref byte fb = ref MemoryMarshal.GetReference(memory.FrameBuffer);
+        ref ushort mergedTable8 = ref Unsafe.NullRef<ushort>();
+        ref ushort mergedTable16 = ref Unsafe.NullRef<ushort>();
+        /* Keep the originals alive for GetArrayRef lazy-init checks. */
         ref DlMemory.DecompLookupEntry decompTable8Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
-        ref byte decompTable8Colors = ref Unsafe.NullRef<byte>();
         ref DlMemory.DecompLookupEntry decompTable16Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
-        ref ushort decompTable16Colors = ref Unsafe.NullRef<ushort>();
 
         /*
          * Note: the dirty range is NOT reset here.  It accumulates across every
@@ -86,14 +87,14 @@ internal static class DlDecoder
 
                     case Commands.WriteComp8:
                     {
-                        if (Unsafe.IsNullRef(ref decompTable8Lookup))
+                        if (Unsafe.IsNullRef(ref mergedTable8))
                         {
                             decompTable8Lookup = ref GetArrayRef(memory.DecompTable8Lookup);
-                            decompTable8Colors = ref GetArrayRef(memory.DecompTable8Colors);
+                            mergedTable8 = ref GetArrayRef(memory.MergedDecompTable8);
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors, memory);
+                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in mergedTable8, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
                             memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
@@ -104,14 +105,14 @@ internal static class DlDecoder
 
                     case Commands.WriteComp16:
                     {
-                        if (Unsafe.IsNullRef(ref decompTable16Lookup))
+                        if (Unsafe.IsNullRef(ref mergedTable16))
                         {
                             decompTable16Lookup = ref GetArrayRef(memory.DecompTable16Lookup);
-                            decompTable16Colors = ref GetArrayRef(memory.DecompTable16Colors);
+                            mergedTable16 = ref GetArrayRef(memory.MergedDecompTable16);
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors, memory);
+                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in mergedTable16, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
                             memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
@@ -682,7 +683,10 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in byte decompColors, DlMemory? stats = null)
+    /* WriteComp8 using merged table (stride 9 ushorts per entry: [rawValue, c0..c7]).
+     * Colors are stored as ushort but the 8-bit codec delta-accumulates bytes;
+     * we mask to byte after adding the accumulator. */
+    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in ushort mergedTable, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -706,12 +710,12 @@ internal static class DlDecoder
             byte bits = stream;
             stream = ref Unsafe.Add(ref stream, 1);
 
-            nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
+            nuint baseIdx = (nuint)((tableIndex << 8) | bits) * 9u;
             if (tableIndex > maxTableIndex) maxTableIndex = tableIndex;
-            DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
-
-            uint colorCount = entry.ColorCount;
-            tableIndex = entry.Jump;
+            ref ushort entry = ref Unsafe.Add(ref Unsafe.AsRef(in mergedTable), baseIdx);
+            ushort rawValue = entry;
+            uint colorCount = rawValue & 0xFu;
+            tableIndex = (ulong)(rawValue >> 4);
             if (pixelCount < colorCount)
             {
                 colorCount = pixelCount;
@@ -719,14 +723,24 @@ internal static class DlDecoder
 
             pixelCount -= colorCount;
 
+            /* Read colors from merged entry (colors at baseIdx+1..baseIdx+8, stored as ushort but used as byte). */
+            ref ushort colorsStart = ref Unsafe.Add(ref entry, 1);
             Vector64<byte> entryColorsVector;
             if (colorCount >= 4)
             {
-                entryColorsVector = Unsafe.Add(ref Unsafe.As<byte, Vector64<byte>>(ref Unsafe.AsRef(in decompColors)), lookupIndex);
+                /* Load 8 bytes = 4 ushorts; we need 8 color bytes packed, colors are low bytes of each ushort. */
+                entryColorsVector = Vector64.Create(
+                    (byte)Unsafe.Add(ref colorsStart, 0), (byte)Unsafe.Add(ref colorsStart, 1),
+                    (byte)Unsafe.Add(ref colorsStart, 2), (byte)Unsafe.Add(ref colorsStart, 3),
+                    (byte)Unsafe.Add(ref colorsStart, 4), (byte)Unsafe.Add(ref colorsStart, 5),
+                    (byte)Unsafe.Add(ref colorsStart, 6), (byte)Unsafe.Add(ref colorsStart, 7));
             }
             else
             {
-                entryColorsVector = Vector64.Create(Unsafe.As<Vector64<byte>, uint>(ref Unsafe.Add(ref Unsafe.As<byte, Vector64<byte>>(ref Unsafe.AsRef(in decompColors)), lookupIndex))).AsByte();
+                entryColorsVector = Vector64.Create(
+                    (byte)Unsafe.Add(ref colorsStart, 0), (byte)Unsafe.Add(ref colorsStart, 1),
+                    (byte)Unsafe.Add(ref colorsStart, 2), (byte)Unsafe.Add(ref colorsStart, 3),
+                    0, 0, 0, 0);
             }
 
             entryColorsVector += Vector64.Create(accumulator);
@@ -784,7 +798,12 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in ushort decompColors, DlMemory? stats = null)
+    /* WriteComp16 using merged table (stride 9 ushorts: [rawValue, c0..c7]).
+     * Both entry word and 8 color ushorts are within 18 consecutive bytes,
+     * typically one cache line, versus the prior layout that needed one cache
+     * line from decompTable (2B entries) PLUS a separate one from decompColors
+     * (16B entries) — two L2 misses per loop iteration vs. typically one now. */
+    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in ushort mergedTable, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -805,12 +824,13 @@ internal static class DlDecoder
         {
             byte bits = stream;
             stream = ref Unsafe.Add(ref stream, 1);
-            nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
+            nuint baseIdx = (nuint)((tableIndex << 8) | bits) * 9u;
             if (tableIndex > maxTableIndex16) maxTableIndex16 = tableIndex;
-            DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
+            ref ushort entryBase = ref Unsafe.Add(ref Unsafe.AsRef(in mergedTable), baseIdx);
+            ushort rawValue = entryBase;
+            uint colorCount = rawValue & 0xFu;
+            tableIndex = (ulong)(rawValue >> 4);
 
-            uint colorCount = entry.ColorCount;
-            tableIndex = entry.Jump;
             if (pixelCount < colorCount)
             {
                 colorCount = pixelCount;
@@ -818,61 +838,12 @@ internal static class DlDecoder
 
             pixelCount -= colorCount;
 
-            /*ulong entryColors;
-            if (colorCount >= 4)
-            {
-                Vector128<ushort> entryColorsVector = Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex);
-                entryColorsVector += Vector128.Create(accumulator);
-                accumulator = entryColorsVector.GetElement(7);
-
-                if (colorCount == 8)
-                {
-                    Unsafe.As<ushort, Vector128<ushort>>(ref fbPixels) = entryColorsVector;
-                    fbPixels = ref Unsafe.Add(ref fbPixels, 8);
-                    continue;
-                }
-
-                Unsafe.As<ushort, ulong>(ref fbPixels) = entryColorsVector.AsUInt64().GetElement(0);
-                fbPixels = ref Unsafe.Add(ref fbPixels, 4);
-                if (colorCount == 4)
-                {
-                    continue;
-                }
-
-                colorCount -= 4;
-                entryColors = entryColorsVector.AsUInt64().GetElement(1);
-            }
-            else if (colorCount == 0)
-            {
-                accumulator += Unsafe.As<Vector128<ushort>, ushort>(ref Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex));
-                continue;
-            }
-            else
-            {
-                Vector64<ushort> entryColorsVector = Unsafe.As<Vector128<ushort>, Vector64<ushort>>(ref Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex));
-                entryColorsVector += Vector64.Create(accumulator);
-                accumulator = entryColorsVector.GetElement(3);
-
-                entryColors = entryColorsVector.AsUInt64().ToScalar();
-            }
-
-            if (colorCount >= 2)
-            {
-                Unsafe.As<ushort, uint>(ref fbPixels) = (uint)entryColors;
-                fbPixels = ref Unsafe.Add(ref fbPixels, 2);
-                entryColors >>= 32;
-                colorCount -= 2;
-            }
-
-            if (colorCount == 1)
-            {
-                fbPixels = (ushort)entryColors;
-                fbPixels = ref Unsafe.Add(ref fbPixels, 1);
-            }*/
+            ref ushort colorsStart = ref Unsafe.Add(ref entryBase, 1);
 
             if (colorCount == 8)
             {
-                Vector128<ushort> entryColors = Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex);
+                /* Unaligned 128-bit load — legal on ARM64. */
+                Vector128<ushort> entryColors = Unsafe.As<ushort, Vector128<ushort>>(ref colorsStart);
                 entryColors += Vector128.Create(accumulator);
                 Unsafe.As<ushort, Vector128<ushort>>(ref fbPixels) = entryColors;
                 fbPixels = ref Unsafe.Add(ref fbPixels, Vector128<ushort>.Count);
@@ -880,7 +851,7 @@ internal static class DlDecoder
             }
             else
             {
-                ref ushort entryColorsRef = ref Unsafe.As<Vector128<ushort>, ushort>(ref Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex));
+                ref ushort entryColorsRef = ref colorsStart;
                 ref ushort entryColorsRefEnd = ref Unsafe.Add(ref entryColorsRef, colorCount);
                 while (Unsafe.IsAddressLessThan(ref entryColorsRef, ref entryColorsRefEnd))
                 {
@@ -964,6 +935,18 @@ internal static class DlDecoder
         BuildTableLookup(table, memory.DecompTable8Lookup, memory.DecompTable8Colors, 0, 0);
         BuildTableLookup(table, memory.DecompTable16Lookup, memory.DecompTable16Colors, 8, 8);
 
+        /*
+         * Build merged interleaved tables. Each entry is 9 ushorts:
+         *   [0]   = RawValue (ColorCount | Jump<<4)
+         *   [1-8] = 8 color values
+         * Both reads for a given lookupIndex land in the same ~18-byte region
+         * (~1 cache line), versus the split layout which needs one cache line
+         * from each separate array (2 L2 misses per lookup when not in L1).
+         * See DlMemory.MergedDecompTable16 for the working-set analysis.
+         */
+        BuildMergedLookup(memory.DecompTable16Lookup, memory.DecompTable16Colors, ref memory.MergedDecompTable16);
+        BuildMergedLookup8(memory.DecompTable8Lookup, memory.DecompTable8Colors, ref memory.MergedDecompTable8);
+
         return 8 + (length * DecompEntry.ByteLength);
 
         static void ReallocArray<T>([NotNull] ref T[]? array, int length)
@@ -1035,6 +1018,50 @@ internal static class DlDecoder
 
             colors[colorCount..LookupBitCount].Fill(T.CreateTruncating(accumulator));
             return new((ushort)colorCount, (ushort)tableIndex);
+        }
+    }
+
+    /*
+     * Pack DecompTable16Lookup + DecompTable16Colors into one ushort[] with stride 9.
+     * Layout per entry: [RawValue, c0, c1, c2, c3, c4, c5, c6, c7]
+     * Access: baseIdx = lookupIndex * 9; entry = merged[baseIdx]; colors start at merged[baseIdx+1].
+     */
+    private static void BuildMergedLookup(DlMemory.DecompLookupEntry[] lookup, ushort[] colors, ref ushort[]? merged)
+    {
+        int numEntries = lookup.Length;
+        merged = GC.AllocateUninitializedArray<ushort>(numEntries * 9);
+        for (int i = 0; i < numEntries; i++)
+        {
+            merged[i * 9] = lookup[i].RawValue;
+            int colorBase = i * 8;
+            merged[i * 9 + 1] = colors[colorBase];
+            merged[i * 9 + 2] = colors[colorBase + 1];
+            merged[i * 9 + 3] = colors[colorBase + 2];
+            merged[i * 9 + 4] = colors[colorBase + 3];
+            merged[i * 9 + 5] = colors[colorBase + 4];
+            merged[i * 9 + 6] = colors[colorBase + 5];
+            merged[i * 9 + 7] = colors[colorBase + 6];
+            merged[i * 9 + 8] = colors[colorBase + 7];
+        }
+    }
+
+    /* Same for 8-bit table. decompColors8 stores byte[] but merged table is ushort[] for uniform access. */
+    private static void BuildMergedLookup8(DlMemory.DecompLookupEntry[] lookup, byte[] colors, ref ushort[]? merged)
+    {
+        int numEntries = lookup.Length;
+        merged = GC.AllocateUninitializedArray<ushort>(numEntries * 9);
+        for (int i = 0; i < numEntries; i++)
+        {
+            merged[i * 9] = lookup[i].RawValue;
+            int colorBase = i * 8;
+            merged[i * 9 + 1] = colors[colorBase];
+            merged[i * 9 + 2] = colors[colorBase + 1];
+            merged[i * 9 + 3] = colors[colorBase + 2];
+            merged[i * 9 + 4] = colors[colorBase + 3];
+            merged[i * 9 + 5] = colors[colorBase + 4];
+            merged[i * 9 + 6] = colors[colorBase + 5];
+            merged[i * 9 + 7] = colors[colorBase + 6];
+            merged[i * 9 + 8] = colors[colorBase + 7];
         }
     }
 
