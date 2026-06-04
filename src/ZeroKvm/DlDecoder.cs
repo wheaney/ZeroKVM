@@ -42,6 +42,8 @@ internal static class DlDecoder
         ref DlMemory.DecompLookupEntry decompTable16Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
         ref ushort decompTable16Colors = ref Unsafe.NullRef<ushort>();
 
+        memory.ResetDirtyRange();
+
         try
         {
             while (Unsafe.ByteOffset(ref stream, ref streamEnd) >= 2)
@@ -53,10 +55,14 @@ internal static class DlDecoder
                 {
                     case Commands.WriteRlx8:
                         commandLength = WriteRlx8(ref commandStart, ref streamEnd, ref fb);
+                        if (commandLength > 0)
+                            memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), commandLength);
                         break;
 
                     case Commands.WriteRlx16:
                         commandLength = WriteRlx16(ref commandStart, ref streamEnd, ref fb);
+                        if (commandLength > 0)
+                            memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), commandLength * sizeof(ushort));
                         break;
 
                     case Commands.WriteComp8:
@@ -67,6 +73,8 @@ internal static class DlDecoder
                         }
 
                         commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors);
+                        if (commandLength > 0)
+                            memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), commandLength);
                         break;
 
                     case Commands.WriteComp16:
@@ -77,6 +85,8 @@ internal static class DlDecoder
                         }
 
                         commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors);
+                        if (commandLength > 0)
+                            memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), commandLength * sizeof(ushort));
                         break;
 
                     case Commands.FlushPipe:
@@ -127,22 +137,46 @@ internal static class DlDecoder
                     return SetRegister(ref commandStart, ref streamEnd, memory);
 
                 case Commands.Write8:
-                    return Write8(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Write8(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n);
+                    return n;
+                }
 
                 case Commands.Write16:
-                    return Write16(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Write16(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n * sizeof(ushort));
+                    return n;
+                }
 
                 case Commands.Fill8:
-                    return Fill8(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Fill8(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n);
+                    return n;
+                }
 
                 case Commands.Fill16:
-                    return Fill16(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Fill16(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n * sizeof(ushort));
+                    return n;
+                }
 
                 case Commands.Copy8:
-                    return Copy8(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Copy8(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n);
+                    return n;
+                }
 
                 case Commands.Copy16:
-                    return Copy16(ref commandStart, ref streamEnd, ref fb);
+                {
+                    int n = Copy16(ref commandStart, ref streamEnd, ref fb);
+                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref commandStart)), n * sizeof(ushort));
+                    return n;
+                }
 
                 case Commands.LoadDecompTable:
                     return LoadDecompTable(ref commandStart, ref streamEnd, memory);

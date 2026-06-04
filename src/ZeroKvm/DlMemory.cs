@@ -47,6 +47,28 @@ internal class DlMemory
     private readonly ushort[] _frameBufferDiff16;
     private readonly byte[] _frameBufferDiff8;
 
+    /* Dirty byte range tracked by MarkDirty(); reset by ResetDirtyRange(). */
+    private int _dirtyByteMin = int.MaxValue;
+    private int _dirtyByteMax = int.MinValue;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void MarkDirty(int byteAddress, int byteCount)
+    {
+        if (byteCount <= 0)
+            return;
+        if (byteAddress < _dirtyByteMin)
+            _dirtyByteMin = byteAddress;
+        int end = byteAddress + byteCount;
+        if (end > _dirtyByteMax)
+            _dirtyByteMax = end;
+    }
+
+    public void ResetDirtyRange()
+    {
+        _dirtyByteMin = int.MaxValue;
+        _dirtyByteMax = int.MinValue;
+    }
+
     public DecompLookupEntry[]? DecompTable8Lookup;
     public byte[]? DecompTable8Colors;
     public DecompLookupEntry[]? DecompTable16Lookup;
@@ -125,6 +147,28 @@ internal class DlMemory
         }
         ArgumentOutOfRangeException.ThrowIfLessThan(fb.Length, checked(stridePixels * height));
 
+        /*
+         * Clamp the scan to only the rows touched by the most recent decode pass.
+         * _dirtyByteMin/_dirtyByteMax are byte offsets into FrameBuffer set by
+         * MarkDirty() in DlDecoder.Process(). Converting to row range: each row
+         * is lineStride pixels = lineStride*2 bytes for the 16-bpp plane.
+         * Fall back to the full frame when no dirty range was recorded (e.g.
+         * a flush call after a register-only packet that made no pixel writes).
+         */
+        int lineStrideBytes = lineStride * sizeof(ushort);
+        int dirtyRowFirst = 0;
+        int dirtyRowLast = height;
+        if (_dirtyByteMin <= _dirtyByteMax && lineStrideBytes > 0 && _fb16BaseOffset >= 0)
+        {
+            int planeByteMin = _dirtyByteMin - _fb16BaseOffset;
+            int planeByteMax = _dirtyByteMax - _fb16BaseOffset;
+            if (planeByteMax > 0 && planeByteMin < fb16Size)
+            {
+                dirtyRowFirst = Math.Max(0, planeByteMin / lineStrideBytes);
+                dirtyRowLast  = Math.Min(height, (planeByteMax + lineStrideBytes - 1) / lineStrideBytes);
+            }
+        }
+
         ReadOnlySpan<ushort> fb16 = MemoryMarshal.Cast<byte, ushort>(_frameBuffer.AsSpan(_fb16BaseOffset, fb16Size));
         int modifiedX1, modifiedY1, modifiedX2, modifiedY2;
         if (ColorDepth == RgbColorDepth.Rgb24Bits)
@@ -142,7 +186,9 @@ internal class DlMemory
                 _frameBufferDiff8,
                 _fb8LineStride,
                 stridePixels,
-                fb);
+                fb,
+                dirtyRowFirst,
+                dirtyRowLast);
         }
         else
         {
@@ -151,7 +197,9 @@ internal class DlMemory
                 _frameBufferDiff16,
                 lineStride,
                 stridePixels,
-                fb);
+                fb,
+                dirtyRowFirst,
+                dirtyRowLast);
         }
 
         return new()
@@ -234,7 +282,9 @@ internal class DlMemory
         Span<ushort> sourceDiff,
         int lineStride,
         int destinationStride,
-        Span<uint> destination)
+        Span<uint> destination,
+        int dirtyRowFirst = 0,
+        int dirtyRowLast = int.MaxValue)
     {
         ArgumentOutOfRangeException.ThrowIfZero(source.Length);
         ArgumentOutOfRangeException.ThrowIfLessThan(sourceDiff.Length, source.Length);
@@ -249,9 +299,13 @@ internal class DlMemory
         ref ushort sourceDiffRef = ref MemoryMarshal.GetReference(sourceDiff);
         ref uint destinationRef = ref MemoryMarshal.GetReference(destination);
         int length = source.Length;
+        int totalRows = length / lineStride;
+        int rowFirst = Math.Max(0, dirtyRowFirst);
+        int rowLast  = Math.Min(totalRows, dirtyRowLast);
         int vectorLineLength = lineStride - (lineStride % Vector128<ushort>.Count);
-        for (int i = 0, y = 0; i < length; i += lineStride, y++)
+        for (int y = rowFirst; y < rowLast; y++)
         {
+            int i = y * lineStride;
             ref uint lineDestinationRef = ref Unsafe.Add(ref destinationRef, y * destinationStride);
             (int lineX1, int lineX2) = CopyLine16(
                 ref Unsafe.Add(ref sourceRef, i),
@@ -274,12 +328,12 @@ internal class DlMemory
 
                 if (y2 == 0)
                 {
-                    y1 = i / lineStride;
-                    y2 = y1 + 1;
+                    y1 = y;
+                    y2 = y + 1;
                 }
                 else
                 {
-                    y2 = (i / lineStride) + 1;
+                    y2 = y + 1;
                 }
             }
         }
@@ -375,7 +429,9 @@ internal class DlMemory
         Span<byte> sourceDiff8,
         int lineStride8,
         int destinationStride,
-        Span<uint> destination)
+        Span<uint> destination,
+        int dirtyRowFirst = 0,
+        int dirtyRowLast = int.MaxValue)
     {
         // Combine the 16-bit plane (RGB565, providing MSBs of each channel) with the
         // 8-bit plane (RGB323, providing LSBs).  The per-channel merge is:
@@ -391,6 +447,9 @@ internal class DlMemory
         int y2 = 0;
         ArgumentOutOfRangeException.ThrowIfLessThan(destination.Length, checked(destinationStride * height));
 
+        int rowFirst = Math.Max(0, dirtyRowFirst);
+        int rowLast  = Math.Min(height, dirtyRowLast);
+
         ref ushort src16Ref = ref MemoryMarshal.GetReference(source16);
         ref ushort diff16Ref = ref MemoryMarshal.GetReference(sourceDiff16);
         ref byte src8Ref = ref MemoryMarshal.GetReference(source8);
@@ -398,7 +457,7 @@ internal class DlMemory
         ref uint dstRef = ref MemoryMarshal.GetReference(destination);
         bool useNeon = AdvSimd.Arm64.IsSupported;
 
-        for (int y = 0; y < height; y++)
+        for (int y = rowFirst; y < rowLast; y++)
         {
             int base16 = y * lineStride16;
             int base8 = y * lineStride8;
