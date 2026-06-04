@@ -69,6 +69,17 @@ internal class DlMemory
         _dirtyByteMax = int.MinValue;
     }
 
+    /* Per-command-type pixel counters — accumulated across all Process() calls. */
+    public long StatsWriteRlx16Pixels;
+    public long StatsWriteComp16Pixels;
+    public long StatsWriteRlx8Pixels;
+    public long StatsWrite16Pixels;
+    public long StatsWrite8Pixels;
+    public long StatsFill16Pixels;
+    public long StatsCopy16Pixels;
+    public long StatsOtherPixels;
+    public long StatsPackets;
+
     public DecompLookupEntry[]? DecompTable8Lookup;
     public byte[]? DecompTable8Colors;
     public DecompLookupEntry[]? DecompTable16Lookup;

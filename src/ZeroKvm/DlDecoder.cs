@@ -43,6 +43,7 @@ internal static class DlDecoder
         ref ushort decompTable16Colors = ref Unsafe.NullRef<ushort>();
 
         memory.ResetDirtyRange();
+        memory.StatsPackets++;
 
         try
         {
@@ -57,8 +58,11 @@ internal static class DlDecoder
                     {
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                         commandLength = WriteRlx8(ref commandStart, ref streamEnd, ref fb);
-                        if (commandLength > 0)
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24));
+                        if (commandLength > 0) {
+                            int px = (int)Wrap256(hdr >> 24);
+                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
+                            memory.StatsWriteRlx8Pixels += px;
+                        }
                         break;
                     }
 
@@ -66,8 +70,11 @@ internal static class DlDecoder
                     {
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                         commandLength = WriteRlx16(ref commandStart, ref streamEnd, ref fb);
-                        if (commandLength > 0)
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24) * sizeof(ushort));
+                        if (commandLength > 0) {
+                            int px = (int)Wrap256(hdr >> 24);
+                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
+                            memory.StatsWriteRlx16Pixels += px;
+                        }
                         break;
                     }
 
@@ -81,8 +88,11 @@ internal static class DlDecoder
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                         commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors);
-                        if (commandLength > 0)
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24));
+                        if (commandLength > 0) {
+                            int px = (int)Wrap256(hdr >> 24);
+                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
+                            memory.StatsWriteRlx8Pixels += px; // grouped with 8-bit commands
+                        }
                         break;
                     }
 
@@ -96,8 +106,11 @@ internal static class DlDecoder
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                         commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors);
-                        if (commandLength > 0)
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24) * sizeof(ushort));
+                        if (commandLength > 0) {
+                            int px = (int)Wrap256(hdr >> 24);
+                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
+                            memory.StatsWriteComp16Pixels += px;
+                        }
                         break;
                     }
 
@@ -152,7 +165,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Write8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsWrite8Pixels += px; }
                     return n;
                 }
 
@@ -160,7 +173,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Write16(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24) * sizeof(ushort));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort)); memory.StatsWrite16Pixels += px; }
                     return n;
                 }
 
@@ -168,7 +181,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Fill8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsOtherPixels += px; }
                     return n;
                 }
 
@@ -176,7 +189,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Fill16(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24) * sizeof(ushort));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort)); memory.StatsFill16Pixels += px; }
                     return n;
                 }
 
@@ -184,7 +197,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Copy8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsOtherPixels += px; }
                     return n;
                 }
 
@@ -192,7 +205,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Copy16(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) memory.MarkDirty(UInt24BeLsbToInt32(hdr), (int)Wrap256(hdr >> 24) * sizeof(ushort));
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort)); memory.StatsCopy16Pixels += px; }
                     return n;
                 }
 

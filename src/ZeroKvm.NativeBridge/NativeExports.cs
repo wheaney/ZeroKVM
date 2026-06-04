@@ -192,6 +192,54 @@ public static unsafe class NativeExports
         return handle == 0 ? 0u : checked((uint)Math.Max(0, GetContext(handle).Memory.FrameBuffer8BaseOffset));
     }
 
+    /*
+     * Read and reset per-command-type pixel counters accumulated by DlDecoder.
+     * All counts are reset to zero after this call so callers see per-interval deltas.
+     * Return value: total packets processed since the last call.
+     */
+    [UnmanagedCallersOnly(EntryPoint = "zerokvm_udl_get_and_reset_stats")]
+    public static long GetAndResetStats(nint handle,
+                                        long* outWriteComp16,
+                                        long* outWriteRlx16,
+                                        long* outWrite16,
+                                        long* outFill16,
+                                        long* outCopy16,
+                                        long* outOther8)
+    {
+        if (handle == 0)
+            return 0;
+
+        try
+        {
+            DlMemory memory = GetContext(handle).Memory;
+            long packets = memory.StatsPackets;
+
+            if (outWriteComp16 is not null) *outWriteComp16 = memory.StatsWriteComp16Pixels;
+            if (outWriteRlx16  is not null) *outWriteRlx16  = memory.StatsWriteRlx16Pixels;
+            if (outWrite16     is not null) *outWrite16     = memory.StatsWrite16Pixels;
+            if (outFill16      is not null) *outFill16      = memory.StatsFill16Pixels;
+            if (outCopy16      is not null) *outCopy16      = memory.StatsCopy16Pixels;
+            if (outOther8      is not null) *outOther8      = memory.StatsWrite8Pixels + memory.StatsWriteRlx8Pixels + memory.StatsOtherPixels;
+
+            memory.StatsPackets          = 0;
+            memory.StatsWriteComp16Pixels = 0;
+            memory.StatsWriteRlx16Pixels  = 0;
+            memory.StatsWrite16Pixels     = 0;
+            memory.StatsFill16Pixels      = 0;
+            memory.StatsCopy16Pixels      = 0;
+            memory.StatsWrite8Pixels      = 0;
+            memory.StatsWriteRlx8Pixels   = 0;
+            memory.StatsOtherPixels       = 0;
+
+            return packets;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex);
+            return 0;
+        }
+    }
+
     private static NativeBridgeContext GetContext(nint handle)
     {
         return (NativeBridgeContext)(GCHandle.FromIntPtr(handle).Target ?? throw new InvalidOperationException("Bridge context was released"));

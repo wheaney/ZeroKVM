@@ -55,3 +55,16 @@ uint16_t zerokvm_udl_get_vpixels(void *handle);
 /* Raw byte offsets into the internal framebuffer (advanced use). */
 uint32_t zerokvm_udl_get_base16bpp(void *handle);
 uint32_t zerokvm_udl_get_base8bpp(void *handle);
+
+/*
+ * Read and atomically reset per-command-type pixel counters accumulated since
+ * the last call. Any out-pointer may be NULL to skip that counter.
+ * Returns the number of Process() calls (packets) since the last reset.
+ */
+int64_t zerokvm_udl_get_and_reset_stats(void *handle,
+                                         int64_t *out_writecomp16_pixels,
+                                         int64_t *out_writerlx16_pixels,
+                                         int64_t *out_write16_pixels,
+                                         int64_t *out_fill16_pixels,
+                                         int64_t *out_copy16_pixels,
+                                         int64_t *out_other8_pixels);
