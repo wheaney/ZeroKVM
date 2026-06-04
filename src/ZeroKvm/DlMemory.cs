@@ -102,6 +102,14 @@ internal class DlMemory
     public ushort[]? MergedDecompTable16;
     public ushort[]? MergedDecompTable8;
 
+    /* Hot lookup tables: root-state rows extracted into compact 256-entry arrays.
+     * comp16 root state = 8, comp8 root state = 0.  Index = input byte; stride = 1
+     * (lookup) or 8 (colors).  Fits in ~4.5 KB per codec → stays in L1. */
+    public ushort[]? HotLookup16;
+    public ushort[]? HotColors16;
+    public ushort[]? HotLookup8;
+    public byte[]?   HotColors8;
+
     public event Action? RegistersUpdate;
     public long LastRegistersUpdateTimestamp;
 
