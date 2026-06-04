@@ -294,7 +294,7 @@ internal class DlFunctionFs : FunctionFs
                             _memory.LastRegistersUpdateTimestamp = timestamp;
                         }
 
-                        if (processedCount > 0 && processedCount < stream.Length)
+                        if (processedCount < stream.Length)
                         {
                             unprocessedCount = stream.Length - processedCount;
                             if (unprocessedCount > UnprocessedBufferSize)
