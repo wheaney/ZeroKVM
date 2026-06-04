@@ -42,7 +42,13 @@ internal static class DlDecoder
         ref DlMemory.DecompLookupEntry decompTable16Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
         ref ushort decompTable16Colors = ref Unsafe.NullRef<ushort>();
 
-        memory.ResetDirtyRange();
+        /*
+         * Note: the dirty range is NOT reset here.  It accumulates across every
+         * Process() call and is consumed+reset by CopyFrameBufferTo() at sync
+         * time.  This lets the sink throttle the expensive full-frame convert
+         * (syncing once per display interval rather than once per packet) without
+         * losing the rows touched by packets decoded between syncs.
+         */
         memory.StatsPackets++;
 
         try

@@ -183,6 +183,13 @@ internal class DlMemory
             }
         }
 
+        /*
+         * Consume the accumulated dirty range now that we have read it.  Pixels
+         * decoded after this point belong to the next sync.  (A full-frame
+         * fallback above already covers the empty-range / initial case.)
+         */
+        ResetDirtyRange();
+
         ReadOnlySpan<ushort> fb16 = MemoryMarshal.Cast<byte, ushort>(_frameBuffer.AsSpan(_fb16BaseOffset, fb16Size));
         int modifiedX1, modifiedY1, modifiedX2, modifiedY2;
         if (ColorDepth == RgbColorDepth.Rgb24Bits)
