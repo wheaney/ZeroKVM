@@ -533,6 +533,8 @@ internal class DlMemory
         ref uint dstRef = ref MemoryMarshal.GetReference(destination);
         bool useNeon = AdvSimd.Arm64.IsSupported;
 
+        bool hasDirtyRows24 = dirtyRowFirst > 0 || dirtyRowLast < int.MaxValue;
+
         for (int y = rowFirst; y < rowLast; y++)
         {
             int base16 = y * lineStride16;
@@ -552,14 +554,21 @@ internal class DlMemory
                     ref byte diff8 = ref Unsafe.Add(ref diff8Ref, base8 + x);
 
                     Vector128<ushort> v16 = Unsafe.As<ushort, Vector128<ushort>>(ref src16);
-                    Vector128<ushort> d16 = Unsafe.As<ushort, Vector128<ushort>>(ref diff16);
                     Vector64<byte> v8 = Unsafe.As<byte, Vector64<byte>>(ref src8);
-                    Vector64<byte> d8 = Unsafe.As<byte, Vector64<byte>>(ref diff8);
 
-                    if (Vector128.EqualsAll(v16, d16) &&
-                        v8.AsUInt64().ToScalar() == d8.AsUInt64().ToScalar())
+                    /* Within dirty rows, skip the diff comparison — _frameBufferDiff16 is
+                     * stale because CopyLine16Full no longer updates it.  Unconditional
+                     * conversion is correct; we still write back the diff so subsequent
+                     * syncs outside the dirty range can compare correctly. */
+                    if (!hasDirtyRows24)
                     {
-                        continue;
+                        Vector128<ushort> d16 = Unsafe.As<ushort, Vector128<ushort>>(ref diff16);
+                        Vector64<byte> d8 = Unsafe.As<byte, Vector64<byte>>(ref diff8);
+                        if (Vector128.EqualsAll(v16, d16) &&
+                            v8.AsUInt64().ToScalar() == d8.AsUInt64().ToScalar())
+                        {
+                            continue;
+                        }
                     }
 
                     Unsafe.As<ushort, Vector128<ushort>>(ref diff16) = v16;
@@ -598,7 +607,8 @@ internal class DlMemory
                 ushort px16 = Unsafe.Add(ref src16Ref, base16 + x);
                 byte px8 = Unsafe.Add(ref src8Ref, base8 + x);
 
-                if (px16 != Unsafe.Add(ref diff16Ref, base16 + x) ||
+                if (hasDirtyRows24 ||
+                    px16 != Unsafe.Add(ref diff16Ref, base16 + x) ||
                     px8 != Unsafe.Add(ref diff8Ref, base8 + x))
                 {
                     Unsafe.Add(ref diff16Ref, base16 + x) = px16;

@@ -70,8 +70,7 @@ internal static class DlDecoder
                         commandLength = WriteRlx8(ref commandStart, ref streamEnd, ref fb);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
-                            memory.StatsWriteRlx8Pixels += px;
+                            memory.StatsWriteRlx8Pixels += px; /* 8-bit plane: no MarkDirty */
                         }
                         break;
                     }
@@ -102,7 +101,9 @@ internal static class DlDecoder
                         commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors, in decompTable8HotLookup, in decompTable8HotColors, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
+                            /* Do NOT MarkDirty for 8-bit plane commands: their addresses
+                             * are relative to _fb8BaseOffset, not _fb16BaseOffset, so they
+                             * corrupt the dirty-row range used by CopyFrameBufferTo. */
                             memory.StatsWriteComp8Pixels += px;
                         }
                         break;
@@ -179,7 +180,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Write8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsWrite8Pixels += px; }
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.StatsWrite8Pixels += px; /* 8-bit plane: no MarkDirty */ }
                     return n;
                 }
 
@@ -195,7 +196,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Fill8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsOtherPixels += px; }
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.StatsOtherPixels += px; /* 8-bit plane: no MarkDirty */ }
                     return n;
                 }
 
@@ -211,7 +212,7 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Copy8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsOtherPixels += px; }
+                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.StatsOtherPixels += px; /* 8-bit plane: no MarkDirty */ }
                     return n;
                 }
 
