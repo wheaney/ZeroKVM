@@ -912,18 +912,6 @@ internal static class DlDecoder
         BuildTableLookup(table, memory.DecompTable8Lookup, memory.DecompTable8Colors, 0, 0);
         BuildTableLookup(table, memory.DecompTable16Lookup, memory.DecompTable16Colors, 8, 8);
 
-        /*
-         * Build merged interleaved tables. Each entry is 9 ushorts:
-         *   [0]   = RawValue (ColorCount | Jump<<4)
-         *   [1-8] = 8 color values
-         * Both reads for a given lookupIndex land in the same ~18-byte region
-         * (~1 cache line), versus the split layout which needs one cache line
-         * from each separate array (2 L2 misses per lookup when not in L1).
-         * See DlMemory.MergedDecompTable16 for the working-set analysis.
-         */
-        BuildMergedLookup(memory.DecompTable16Lookup, memory.DecompTable16Colors, ref memory.MergedDecompTable16);
-        BuildMergedLookup8(memory.DecompTable8Lookup, memory.DecompTable8Colors, ref memory.MergedDecompTable8);
-
         return 8 + (length * DecompEntry.ByteLength);
 
         static void ReallocArray<T>([NotNull] ref T[]? array, int length)
@@ -995,50 +983,6 @@ internal static class DlDecoder
 
             colors[colorCount..LookupBitCount].Fill(T.CreateTruncating(accumulator));
             return new((ushort)colorCount, (ushort)tableIndex);
-        }
-    }
-
-    /*
-     * Pack DecompTable16Lookup + DecompTable16Colors into one ushort[] with stride 9.
-     * Layout per entry: [RawValue, c0, c1, c2, c3, c4, c5, c6, c7]
-     * Access: baseIdx = lookupIndex * 9; entry = merged[baseIdx]; colors start at merged[baseIdx+1].
-     */
-    private static void BuildMergedLookup(DlMemory.DecompLookupEntry[] lookup, ushort[] colors, ref ushort[]? merged)
-    {
-        int numEntries = lookup.Length;
-        merged = GC.AllocateUninitializedArray<ushort>(numEntries * 9);
-        for (int i = 0; i < numEntries; i++)
-        {
-            merged[i * 9] = lookup[i].RawValue;
-            int colorBase = i * 8;
-            merged[i * 9 + 1] = colors[colorBase];
-            merged[i * 9 + 2] = colors[colorBase + 1];
-            merged[i * 9 + 3] = colors[colorBase + 2];
-            merged[i * 9 + 4] = colors[colorBase + 3];
-            merged[i * 9 + 5] = colors[colorBase + 4];
-            merged[i * 9 + 6] = colors[colorBase + 5];
-            merged[i * 9 + 7] = colors[colorBase + 6];
-            merged[i * 9 + 8] = colors[colorBase + 7];
-        }
-    }
-
-    /* Same for 8-bit table. decompColors8 stores byte[] but merged table is ushort[] for uniform access. */
-    private static void BuildMergedLookup8(DlMemory.DecompLookupEntry[] lookup, byte[] colors, ref ushort[]? merged)
-    {
-        int numEntries = lookup.Length;
-        merged = GC.AllocateUninitializedArray<ushort>(numEntries * 9);
-        for (int i = 0; i < numEntries; i++)
-        {
-            merged[i * 9] = lookup[i].RawValue;
-            int colorBase = i * 8;
-            merged[i * 9 + 1] = colors[colorBase];
-            merged[i * 9 + 2] = colors[colorBase + 1];
-            merged[i * 9 + 3] = colors[colorBase + 2];
-            merged[i * 9 + 4] = colors[colorBase + 3];
-            merged[i * 9 + 5] = colors[colorBase + 4];
-            merged[i * 9 + 6] = colors[colorBase + 5];
-            merged[i * 9 + 7] = colors[colorBase + 6];
-            merged[i * 9 + 8] = colors[colorBase + 7];
         }
     }
 
