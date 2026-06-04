@@ -200,11 +200,12 @@ public static unsafe class NativeExports
     [UnmanagedCallersOnly(EntryPoint = "zerokvm_udl_get_and_reset_stats")]
     public static long GetAndResetStats(nint handle,
                                         long* outWriteComp16,
+                                        long* outWriteComp8,
                                         long* outWriteRlx16,
                                         long* outWrite16,
                                         long* outFill16,
                                         long* outCopy16,
-                                        long* outOther8)
+                                        long* outOther)
     {
         if (handle == 0)
             return 0;
@@ -214,22 +215,26 @@ public static unsafe class NativeExports
             DlMemory memory = GetContext(handle).Memory;
             long packets = memory.StatsPackets;
 
-            if (outWriteComp16 is not null) *outWriteComp16 = memory.StatsWriteComp16Pixels;
+            if (outWriteComp16 is not null) *outWriteComp16 = memory.StatsWriteComp16Pixels | ((long)memory.StatsComp16MaxTableIndex << 32);
+            if (outWriteComp8  is not null) *outWriteComp8  = memory.StatsWriteComp8Pixels  | ((long)memory.StatsComp8MaxTableIndex  << 32);
             if (outWriteRlx16  is not null) *outWriteRlx16  = memory.StatsWriteRlx16Pixels;
             if (outWrite16     is not null) *outWrite16     = memory.StatsWrite16Pixels;
             if (outFill16      is not null) *outFill16      = memory.StatsFill16Pixels;
             if (outCopy16      is not null) *outCopy16      = memory.StatsCopy16Pixels;
-            if (outOther8      is not null) *outOther8      = memory.StatsWrite8Pixels + memory.StatsWriteRlx8Pixels + memory.StatsOtherPixels;
+            if (outOther       is not null) *outOther       = memory.StatsWrite8Pixels + memory.StatsWriteRlx8Pixels + memory.StatsOtherPixels;
 
-            memory.StatsPackets          = 0;
-            memory.StatsWriteComp16Pixels = 0;
-            memory.StatsWriteRlx16Pixels  = 0;
-            memory.StatsWrite16Pixels     = 0;
-            memory.StatsFill16Pixels      = 0;
-            memory.StatsCopy16Pixels      = 0;
-            memory.StatsWrite8Pixels      = 0;
-            memory.StatsWriteRlx8Pixels   = 0;
-            memory.StatsOtherPixels       = 0;
+            memory.StatsPackets              = 0;
+            memory.StatsWriteComp16Pixels    = 0;
+            memory.StatsWriteComp8Pixels     = 0;
+            memory.StatsComp16MaxTableIndex  = 0;
+            memory.StatsComp8MaxTableIndex   = 0;
+            memory.StatsWriteRlx16Pixels     = 0;
+            memory.StatsWrite16Pixels        = 0;
+            memory.StatsFill16Pixels         = 0;
+            memory.StatsCopy16Pixels         = 0;
+            memory.StatsWrite8Pixels         = 0;
+            memory.StatsWriteRlx8Pixels      = 0;
+            memory.StatsOtherPixels          = 0;
 
             return packets;
         }

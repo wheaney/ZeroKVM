@@ -87,11 +87,11 @@ internal static class DlDecoder
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors);
+                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
                             memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
-                            memory.StatsWriteRlx8Pixels += px; // grouped with 8-bit commands
+                            memory.StatsWriteComp8Pixels += px;
                         }
                         break;
                     }
@@ -105,7 +105,7 @@ internal static class DlDecoder
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors);
+                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
                             memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
@@ -676,7 +676,7 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in byte decompColors)
+    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in byte decompColors, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -690,6 +690,7 @@ internal static class DlDecoder
         int address = UInt24BeLsbToInt32(header);
         uint pixelCount = Wrap256(header >> 24);
         ulong tableIndex = 0;
+        ulong maxTableIndex = 0;
         ref byte fbPixels = ref Unsafe.Add(ref fb, address);
         ulong pixelBuf = default;
         uint pixelBufLength = 0;
@@ -700,6 +701,7 @@ internal static class DlDecoder
             stream = ref Unsafe.Add(ref stream, 1);
 
             nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
+            if (tableIndex > maxTableIndex) maxTableIndex = tableIndex;
             DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
 
             uint colorCount = entry.ColorCount;
@@ -735,6 +737,9 @@ internal static class DlDecoder
             }
         }
         while (pixelCount > 0 && Unsafe.IsAddressLessThan(ref stream, ref streamEnd));
+
+        if (stats is not null && maxTableIndex > (ulong)stats.StatsComp8MaxTableIndex)
+            stats.StatsComp8MaxTableIndex = (long)maxTableIndex;
 
         if (pixelCount > 0)
         {
@@ -773,7 +778,7 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in ushort decompColors)
+    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in ushort decompColors, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -787,6 +792,7 @@ internal static class DlDecoder
         int address = UInt24BeLsbToInt32(header);
         uint pixelCount = Wrap256(header >> 24);
         ulong tableIndex = 8;
+        ulong maxTableIndex16 = 8;
         ushort accumulator = 0;
         ref ushort fbPixels = ref Unsafe.As<byte, ushort>(ref Unsafe.Add(ref fb, address));
         do
@@ -794,6 +800,7 @@ internal static class DlDecoder
             byte bits = stream;
             stream = ref Unsafe.Add(ref stream, 1);
             nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
+            if (tableIndex > maxTableIndex16) maxTableIndex16 = tableIndex;
             DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
 
             uint colorCount = entry.ColorCount;
@@ -881,6 +888,9 @@ internal static class DlDecoder
             }
         }
         while (pixelCount > 0 && Unsafe.IsAddressLessThan(ref stream, ref streamEnd));
+
+        if (stats is not null && maxTableIndex16 > (ulong)stats.StatsComp16MaxTableIndex)
+            stats.StatsComp16MaxTableIndex = (long)maxTableIndex16;
 
         if (pixelCount > 0)
         {

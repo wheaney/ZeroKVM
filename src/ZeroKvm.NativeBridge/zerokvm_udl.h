@@ -63,8 +63,9 @@ uint32_t zerokvm_udl_get_base8bpp(void *handle);
  */
 int64_t zerokvm_udl_get_and_reset_stats(void *handle,
                                          int64_t *out_writecomp16_pixels,
+                                         int64_t *out_writecomp8_pixels,
                                          int64_t *out_writerlx16_pixels,
                                          int64_t *out_write16_pixels,
                                          int64_t *out_fill16_pixels,
                                          int64_t *out_copy16_pixels,
-                                         int64_t *out_other8_pixels);
+                                         int64_t *out_other_pixels);

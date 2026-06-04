@@ -72,6 +72,7 @@ internal class DlMemory
     /* Per-command-type pixel counters — accumulated across all Process() calls. */
     public long StatsWriteRlx16Pixels;
     public long StatsWriteComp16Pixels;
+    public long StatsWriteComp8Pixels;
     public long StatsWriteRlx8Pixels;
     public long StatsWrite16Pixels;
     public long StatsWrite8Pixels;
@@ -79,6 +80,8 @@ internal class DlMemory
     public long StatsCopy16Pixels;
     public long StatsOtherPixels;
     public long StatsPackets;
+    public long StatsComp16MaxTableIndex;  /* max tableIndex seen across all WriteComp16 calls */
+    public long StatsComp8MaxTableIndex;   /* max tableIndex seen across all WriteComp8 calls */
 
     public DecompLookupEntry[]? DecompTable8Lookup;
     public byte[]? DecompTable8Colors;
