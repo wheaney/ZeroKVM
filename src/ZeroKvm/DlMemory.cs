@@ -19,6 +19,7 @@ internal class DlMemory
         MemoryMarshal.Cast<byte, ushort>(_frameBuffer.AsSpan()).Fill(0b0000011111100000);
         _frameBufferDiff16 = GC.AllocateArray<ushort>(MaxPixels, true);
         _frameBufferDiff8 = GC.AllocateArray<byte>(MaxPixels, true);
+        _compWrittenBits = new byte[(_frameBuffer.Length / CompWrittenGranularity + 7) / 8];
     }
 
     private readonly byte[] _ram;
@@ -47,6 +48,11 @@ internal class DlMemory
     private readonly ushort[] _frameBufferDiff16;
     private readonly byte[] _frameBufferDiff8;
 
+    /* Bitset tracking which 256-byte blocks of the framebuffer were written by WriteComp this frame.
+     * Reset at CopyFrameBufferTo time. Used to measure Copy-source-overlaps-Comp frequency. */
+    private readonly byte[] _compWrittenBits;
+    private const int CompWrittenGranularity = 256;
+
     /* Dirty byte range tracked by MarkDirty(); reset by ResetDirtyRange(). */
     private int _dirtyByteMin = int.MaxValue;
     private int _dirtyByteMax = int.MinValue;
@@ -67,6 +73,26 @@ internal class DlMemory
     {
         _dirtyByteMin = int.MaxValue;
         _dirtyByteMax = int.MinValue;
+        _compWrittenBits.AsSpan().Clear();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void MarkCompWritten(int byteAddress, int byteCount)
+    {
+        int first = byteAddress / CompWrittenGranularity;
+        int last = (byteAddress + byteCount - 1) / CompWrittenGranularity;
+        for (int i = first; i <= last; i++)
+            _compWrittenBits[i >> 3] |= (byte)(1 << (i & 7));
+    }
+
+    public bool CheckCopySourceOverlapsComp(int byteAddress, int byteCount)
+    {
+        int first = byteAddress / CompWrittenGranularity;
+        int last = (byteAddress + byteCount - 1) / CompWrittenGranularity;
+        for (int i = first; i <= last; i++)
+            if ((_compWrittenBits[i >> 3] & (byte)(1 << (i & 7))) != 0)
+                return true;
+        return false;
     }
 
     /* Per-command-type pixel counters — accumulated across all Process() calls. */
@@ -80,35 +106,38 @@ internal class DlMemory
     public long StatsCopy16Pixels;
     public long StatsOtherPixels;
     public long StatsPackets;
-    public long StatsComp16MaxTableIndex;  /* max tableIndex seen across all WriteComp16 calls */
-    public long StatsComp8MaxTableIndex;   /* max tableIndex seen across all WriteComp8 calls */
-
-    public DecompLookupEntry[]? DecompTable8Lookup;
-    public byte[]? DecompTable8Colors;
-    public DecompLookupEntry[]? DecompTable16Lookup;
-    public ushort[]? DecompTable16Colors;
+    public long StatsCopyTotal;            /* total Copy8 + Copy16 commands */
+    public long StatsCopySourceOverlapsComp; /* subset of above where source overlapped a WriteComp region this frame */
 
     /*
-     * Merged interleaved lookup tables for WriteComp16/8.  Each entry is 9 ushorts:
-     *   [0]   = RawValue  (ColorCount in bits 3:0, Jump in bits 15:4)
-     *   [1..8] = delta-coded color values (8 per entry)
-     * Stride 9 means entry N's entry word and all 8 colors are within 18 consecutive
-     * bytes — typically 1 cache line — versus the current layout that requires one
-     * cache line from decompTable (2B/entry, 32/line) PLUS a separate cache line from
-     * decompColors (16B/entry, 4/line).  Halves L2 miss count on the random-access
-     * inner loop of the decompressor, which is confirmed cache-bound (A72 IPC ~0.84).
-     * comp8 uses only 8 ushort colors but we pad to 9 for uniform stride.
+     * Compact raw binary tree from the wire table: length*2 nodes, 4 bytes each.
+     * Max size: 4096*2*4 = 32KB. Build source for the expanded tables below; not
+     * read in the decode hot path.
      */
-    public ushort[]? MergedDecompTable16;
-    public ushort[]? MergedDecompTable8;
+    public DlDecoder.DecompEntry[]? CompactTree;
 
-    /* Hot lookup tables: root-state rows extracted into compact 256-entry arrays.
-     * comp16 root state = 8, comp8 root state = 0.  Index = input byte; stride = 1
-     * (lookup) or 8 (colors).  Fits in ~4.5 KB per codec → stays in L1. */
+    /* Hot lookup tables: root-state rows only, pre-expanded 8 bits wide.
+     * 256 entries × (2B lookup + 16B colors) = ~4.5 KB each — stays in L1.
+     * Used when an input byte STARTS at the root state (the common case): 1 load/byte. */
     public ushort[]? HotLookup16;
     public ushort[]? HotColors16;
     public ushort[]? HotLookup8;
     public byte[]?   HotColors8;
+
+    /* Non-root lookup tables: every reachable state pre-expanded NonRootBits wide
+     * (see DlDecoder.NonRootBits). Indexed by (state << NonRootBits) | chunk.
+     * Footprint = reachableStates × 2^NonRootBits × (2B lookup + NonRootBits colors),
+     * sized so the touched set stays in L2 (k=2 fits any legal table; ~96KB worst case).
+     * Consumes the input byte in 8/NonRootBits chunks → 8/NonRootBits dependent loads
+     * instead of 8 (one per bit). */
+    public ushort[]? NonRootLookup16;
+    public ushort[]? NonRootColors16;
+    public ushort[]? NonRootLookup8;
+    public byte[]?   NonRootColors8;
+
+    /* Count of reachable states (rows actually built) — diagnostic for tuning NonRootBits. */
+    public int ReachableStates16;
+    public int ReachableStates8;
 
     public event Action? RegistersUpdate;
     public long LastRegistersUpdateTimestamp;

@@ -11,6 +11,16 @@ internal static class DlDecoder
 {
     private const byte CommandHeader = 0xaf;
 
+    /*
+     * Width (in bits) of the non-root pre-expanded decode tables. The input byte is
+     * consumed in 8/NonRootBits chunks, so this is the number of serial dependent
+     * loads per non-root byte (vs 8 for a bit-by-bit walk). Must divide 8 (2 or 4).
+     * Footprint per reachable state = 2^NonRootBits * (2B + NonRootBits*colorSize).
+     * k=2 fits L2 for any legal table (≤96KB worst case); k=4 only if reachable
+     * states stay in the low hundreds — check the ReachableStates* diagnostic.
+     */
+    private const int NonRootBits = 2;
+
     private enum Commands : ushort
     {
         SetRegister = CommandHeader | (0x20 << 8),
@@ -37,14 +47,14 @@ internal static class DlDecoder
         ref byte stream = ref streamStart;
         ref byte streamEnd = ref Unsafe.Add(ref stream, commandStream.Length);
         ref byte fb = ref MemoryMarshal.GetReference(memory.FrameBuffer);
-        ref DlMemory.DecompLookupEntry decompTable8Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
-        ref byte decompTable8Colors = ref Unsafe.NullRef<byte>();
-        ref DlMemory.DecompLookupEntry decompTable16Lookup = ref Unsafe.NullRef<DlMemory.DecompLookupEntry>();
-        ref ushort decompTable16Colors = ref Unsafe.NullRef<ushort>();
-        ref ushort decompTable8HotLookup = ref Unsafe.NullRef<ushort>();
-        ref byte decompTable8HotColors = ref Unsafe.NullRef<byte>();
-        ref ushort decompTable16HotLookup = ref Unsafe.NullRef<ushort>();
-        ref ushort decompTable16HotColors = ref Unsafe.NullRef<ushort>();
+        ref ushort hotLookup8 = ref Unsafe.NullRef<ushort>();
+        ref byte hotColors8 = ref Unsafe.NullRef<byte>();
+        ref ushort hotLookup16 = ref Unsafe.NullRef<ushort>();
+        ref ushort hotColors16 = ref Unsafe.NullRef<ushort>();
+        ref ushort nonRootLookup8 = ref Unsafe.NullRef<ushort>();
+        ref byte nonRootColors8 = ref Unsafe.NullRef<byte>();
+        ref ushort nonRootLookup16 = ref Unsafe.NullRef<ushort>();
+        ref ushort nonRootColors16 = ref Unsafe.NullRef<ushort>();
 
         /*
          * Note: the dirty range is NOT reset here.  It accumulates across every
@@ -90,19 +100,21 @@ internal static class DlDecoder
 
                     case Commands.WriteComp8:
                     {
-                        if (Unsafe.IsNullRef(ref decompTable8Lookup))
+                        if (Unsafe.IsNullRef(ref hotLookup8))
                         {
-                            decompTable8Lookup = ref GetArrayRef(memory.DecompTable8Lookup);
-                            decompTable8Colors = ref GetArrayRef(memory.DecompTable8Colors);
-                            decompTable8HotLookup = ref GetArrayRef(memory.HotLookup8);
-                            decompTable8HotColors = ref GetArrayRef(memory.HotColors8);
+                            hotLookup8 = ref GetArrayRef(memory.HotLookup8);
+                            hotColors8 = ref GetArrayRef(memory.HotColors8);
+                            nonRootLookup8 = ref GetArrayRef(memory.NonRootLookup8);
+                            nonRootColors8 = ref GetArrayRef(memory.NonRootColors8);
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in decompTable8Lookup, in decompTable8Colors, in decompTable8HotLookup, in decompTable8HotColors, memory);
+                        commandLength = WriteComp8(ref commandStart, ref streamEnd, ref fb, in hotLookup8, in hotColors8, in nonRootLookup8, in nonRootColors8, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
+                            int addr = UInt24BeLsbToInt32(hdr);
+                            memory.MarkDirty(addr, px);
+                            memory.MarkCompWritten(addr, px);
                             memory.StatsWriteComp8Pixels += px;
                         }
                         break;
@@ -110,19 +122,21 @@ internal static class DlDecoder
 
                     case Commands.WriteComp16:
                     {
-                        if (Unsafe.IsNullRef(ref decompTable16Lookup))
+                        if (Unsafe.IsNullRef(ref hotLookup16))
                         {
-                            decompTable16Lookup = ref GetArrayRef(memory.DecompTable16Lookup);
-                            decompTable16Colors = ref GetArrayRef(memory.DecompTable16Colors);
-                            decompTable16HotLookup = ref GetArrayRef(memory.HotLookup16);
-                            decompTable16HotColors = ref GetArrayRef(memory.HotColors16);
+                            hotLookup16 = ref GetArrayRef(memory.HotLookup16);
+                            hotColors16 = ref GetArrayRef(memory.HotColors16);
+                            nonRootLookup16 = ref GetArrayRef(memory.NonRootLookup16);
+                            nonRootColors16 = ref GetArrayRef(memory.NonRootColors16);
                         }
 
                         uint hdr = Unsafe.As<byte, uint>(ref commandStart);
-                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in decompTable16Lookup, in decompTable16Colors, in decompTable16HotLookup, in decompTable16HotColors, memory);
+                        commandLength = WriteComp16(ref commandStart, ref streamEnd, ref fb, in hotLookup16, in hotColors16, in nonRootLookup16, in nonRootColors16, memory);
                         if (commandLength > 0) {
                             int px = (int)Wrap256(hdr >> 24);
-                            memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
+                            int addr = UInt24BeLsbToInt32(hdr);
+                            memory.MarkDirty(addr, px * sizeof(ushort));
+                            memory.MarkCompWritten(addr, px * sizeof(ushort));
                             memory.StatsWriteComp16Pixels += px;
                         }
                         break;
@@ -211,7 +225,14 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Copy8(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px); memory.StatsOtherPixels += px; }
+                    if (n > 0) {
+                        int px = (int)Wrap256(hdr >> 24);
+                        int srcAddr = UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref Unsafe.Add(ref commandStart, 4)));
+                        memory.StatsCopyTotal++;
+                        if (memory.CheckCopySourceOverlapsComp(srcAddr, px)) memory.StatsCopySourceOverlapsComp++;
+                        memory.MarkDirty(UInt24BeLsbToInt32(hdr), px);
+                        memory.StatsOtherPixels += px;
+                    }
                     return n;
                 }
 
@@ -219,7 +240,14 @@ internal static class DlDecoder
                 {
                     uint hdr = Unsafe.As<byte, uint>(ref commandStart);
                     int n = Copy16(ref commandStart, ref streamEnd, ref fb);
-                    if (n > 0) { int px = (int)Wrap256(hdr >> 24); memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort)); memory.StatsCopy16Pixels += px; }
+                    if (n > 0) {
+                        int px = (int)Wrap256(hdr >> 24);
+                        int srcAddr = UInt24BeLsbToInt32(Unsafe.As<byte, uint>(ref Unsafe.Add(ref commandStart, 4)));
+                        memory.StatsCopyTotal++;
+                        if (memory.CheckCopySourceOverlapsComp(srcAddr, px * sizeof(ushort))) memory.StatsCopySourceOverlapsComp++;
+                        memory.MarkDirty(UInt24BeLsbToInt32(hdr), px * sizeof(ushort));
+                        memory.StatsCopy16Pixels += px;
+                    }
                     return n;
                 }
 
@@ -690,7 +718,7 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in byte decompColors, in ushort hotLookup8, in byte hotColors8, DlMemory? stats = null)
+    private static int WriteComp8(ref byte stream, ref byte streamEnd, ref byte fb, in ushort hotLookup8, in byte hotColors8, in ushort nonRootLookup8, in byte nonRootColors8, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -703,8 +731,7 @@ internal static class DlDecoder
 
         int address = UInt24BeLsbToInt32(header);
         uint pixelCount = Wrap256(header >> 24);
-        ulong tableIndex = 0;
-        ulong maxTableIndex = 0;
+        uint tableIndex = 0; // comp8 root state
         ref byte fbPixels = ref Unsafe.Add(ref fb, address);
         ulong pixelBuf = default;
         uint pixelBufLength = 0;
@@ -733,45 +760,63 @@ internal static class DlDecoder
                 {
                     entryColorsVector = Vector64.Create(Unsafe.As<byte, uint>(ref hotColorEntry)).AsByte();
                 }
+
+                entryColorsVector += Vector64.Create(accumulator);
+                accumulator = entryColorsVector.GetElement(7);
+                // colorCount==8 would shift by 64 (UL wraps to 0), so special-case it.
+                ulong entryColors = colorCount == 8
+                    ? entryColorsVector.AsUInt64().ToScalar()
+                    : entryColorsVector.AsUInt64().ToScalar() & ((1UL << ((int)colorCount * 8)) - 1);
+                pixelBuf |= entryColors << (int)(pixelBufLength * 8);
+                pixelBufLength += colorCount;
+                if (pixelBufLength >= 8)
+                {
+                    Unsafe.As<byte, ulong>(ref fbPixels) = pixelBuf;
+                    fbPixels = ref Unsafe.Add(ref fbPixels, 8);
+                    pixelBufLength -= 8;
+                    pixelBuf = entryColors >> (int)((colorCount - pixelBufLength) * 8);
+                }
             }
             else
             {
-                nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
-                if (tableIndex > maxTableIndex) maxTableIndex = tableIndex;
-                DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
-
-                colorCount = entry.ColorCount;
-                tableIndex = entry.Jump;
-                if (pixelCount < colorCount) colorCount = pixelCount;
-                pixelCount -= colorCount;
-
-                if (colorCount >= 4)
+                // Non-root: consume the byte in NonRootBits-wide chunks (one dependent
+                // load each) into the pre-expanded table. Emits flush through pixelBuf
+                // like the hot path. tableIndex returns to root (0) on emit.
+                uint b = bits;
+                for (int chunk = 0; chunk < 8 / NonRootBits; chunk++)
                 {
-                    entryColorsVector = Unsafe.Add(ref Unsafe.As<byte, Vector64<byte>>(ref Unsafe.AsRef(in decompColors)), lookupIndex);
-                }
-                else
-                {
-                    entryColorsVector = Vector64.Create(Unsafe.As<Vector64<byte>, uint>(ref Unsafe.Add(ref Unsafe.As<byte, Vector64<byte>>(ref Unsafe.AsRef(in decompColors)), lookupIndex))).AsByte();
-                }
-            }
+                    if (pixelCount == 0) break;
+                    uint chunkBits = b & ((1u << NonRootBits) - 1);
+                    b >>= NonRootBits;
+                    nuint idx = (tableIndex << NonRootBits) | chunkBits;
 
-            entryColorsVector += Vector64.Create(accumulator);
-            accumulator = entryColorsVector.GetElement(7);
-            ulong entryColors = entryColorsVector.AsUInt64().ToScalar() & ((1UL << ((int)colorCount * 8)) - 1);
-            pixelBuf |= entryColors << (int)(pixelBufLength * 8);
-            pixelBufLength += colorCount;
-            if (pixelBufLength >= 8)
-            {
-                Unsafe.As<byte, ulong>(ref fbPixels) = pixelBuf;
-                fbPixels = ref Unsafe.Add(ref fbPixels, 8);
-                pixelBufLength -= 8;
-                pixelBuf = entryColors >> (int)((colorCount - pixelBufLength) * 8);
+                    ushort rawValue = Unsafe.Add(ref Unsafe.AsRef(in nonRootLookup8), idx);
+                    uint chunkColorCount = (uint)rawValue & 0xFu;
+                    tableIndex = (uint)rawValue >> 4;
+                    if (pixelCount < chunkColorCount) chunkColorCount = pixelCount;
+                    pixelCount -= chunkColorCount;
+
+                    ref byte colorsRef = ref Unsafe.Add(ref Unsafe.AsRef(in nonRootColors8), idx * NonRootBits);
+                    for (uint i = 0; i < chunkColorCount; i++)
+                    {
+                        byte pixel = (byte)(accumulator + Unsafe.Add(ref colorsRef, i));
+                        pixelBuf |= (ulong)pixel << (int)(pixelBufLength * 8);
+                        pixelBufLength++;
+                        if (pixelBufLength >= 8)
+                        {
+                            Unsafe.As<byte, ulong>(ref fbPixels) = pixelBuf;
+                            fbPixels = ref Unsafe.Add(ref fbPixels, 8);
+                            pixelBufLength = 0;
+                            pixelBuf = 0;
+                        }
+                    }
+                    // Advance the running accumulator by the entry's total delta:
+                    // colors[chunkColorCount] when not all bits emitted, else the last prefix.
+                    accumulator = (byte)(accumulator + Unsafe.Add(ref colorsRef, chunkColorCount == NonRootBits ? NonRootBits - 1 : (int)chunkColorCount));
+                }
             }
         }
         while (pixelCount > 0 && Unsafe.IsAddressLessThan(ref stream, ref streamEnd));
-
-        if (stats is not null && maxTableIndex > (ulong)stats.StatsComp8MaxTableIndex)
-            stats.StatsComp8MaxTableIndex = (long)maxTableIndex;
 
         if (pixelCount > 0)
         {
@@ -810,7 +855,7 @@ internal static class DlDecoder
         table_lookup: bit
     } repeat until pixel_count is rendered
     */
-    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in DlMemory.DecompLookupEntry decompTable, in ushort decompColors, in ushort hotLookup16, in ushort hotColors16, DlMemory? stats = null)
+    private static int WriteComp16(ref byte stream, ref byte streamEnd, ref byte fb, in ushort hotLookup16, in ushort hotColors16, in ushort nonRootLookup16, in ushort nonRootColors16, DlMemory? stats = null)
     {
         if (Unsafe.ByteOffset(ref stream, ref streamEnd) < 5)
         {
@@ -823,8 +868,7 @@ internal static class DlDecoder
 
         int address = UInt24BeLsbToInt32(header);
         uint pixelCount = Wrap256(header >> 24);
-        ulong tableIndex = 8;
-        ulong maxTableIndex16 = 8;
+        uint tableIndex = 8; // comp16 root state
         ushort accumulator = 0;
         ref ushort fbPixels = ref Unsafe.As<byte, ushort>(ref Unsafe.Add(ref fb, address));
         do
@@ -832,7 +876,7 @@ internal static class DlDecoder
             byte bits = stream;
             stream = ref Unsafe.Add(ref stream, 1);
 
-            if (tableIndex == 8) // hot path: root state, likely L1 hit
+            if (tableIndex == 8) // hot path: byte starts at root, 8-bit L1 lookup
             {
                 ushort rawValue = Unsafe.Add(ref Unsafe.AsRef(in hotLookup16), (nuint)bits);
                 uint colorCount = (uint)rawValue & 0xFu;
@@ -864,43 +908,38 @@ internal static class DlDecoder
             }
             else
             {
-                nuint lookupIndex = (nuint)((tableIndex << 8) | bits);
-                if (tableIndex > maxTableIndex16) maxTableIndex16 = tableIndex;
-                DlMemory.DecompLookupEntry entry = Unsafe.Add(ref Unsafe.AsRef(in decompTable), lookupIndex);
-
-                uint colorCount = entry.ColorCount;
-                tableIndex = entry.Jump;
-                if (pixelCount < colorCount) colorCount = pixelCount;
-                pixelCount -= colorCount;
-
-                if (colorCount == 8)
+                // Non-root: consume the byte in NonRootBits-wide chunks. Each chunk is one
+                // dependent load into the pre-expanded table (L1/L2-resident), so a byte
+                // costs 8/NonRootBits dependent loads instead of 8. tableIndex returns to
+                // root (8) on emit; the outer loop's hot path catches it at the next byte.
+                uint b = bits;
+                for (int chunk = 0; chunk < 8 / NonRootBits; chunk++)
                 {
-                    Vector128<ushort> entryColors = Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex);
-                    entryColors += Vector128.Create(accumulator);
-                    Unsafe.As<ushort, Vector128<ushort>>(ref fbPixels) = entryColors;
-                    fbPixels = ref Unsafe.Add(ref fbPixels, Vector128<ushort>.Count);
-                    accumulator = entryColors.GetElement(7);
-                }
-                else
-                {
-                    ref ushort entryColorsRef = ref Unsafe.As<Vector128<ushort>, ushort>(ref Unsafe.Add(ref Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.AsRef(in decompColors)), lookupIndex));
-                    ref ushort entryColorsRefEnd = ref Unsafe.Add(ref entryColorsRef, colorCount);
-                    while (Unsafe.IsAddressLessThan(ref entryColorsRef, ref entryColorsRefEnd))
+                    if (pixelCount == 0) break;
+                    uint chunkBits = b & ((1u << NonRootBits) - 1);
+                    b >>= NonRootBits;
+                    nuint idx = (tableIndex << NonRootBits) | chunkBits;
+
+                    ushort rawValue = Unsafe.Add(ref Unsafe.AsRef(in nonRootLookup16), idx);
+                    uint colorCount = (uint)rawValue & 0xFu;
+                    tableIndex = (uint)rawValue >> 4;
+                    if (pixelCount < colorCount) colorCount = pixelCount;
+                    pixelCount -= colorCount;
+
+                    ref ushort colorsRef = ref Unsafe.Add(ref Unsafe.AsRef(in nonRootColors16), idx * NonRootBits);
+                    for (uint i = 0; i < colorCount; i++)
                     {
-                        ushort entryColor = entryColorsRef;
-                        entryColorsRef = ref Unsafe.Add(ref entryColorsRef, 1);
-                        fbPixels = (ushort)(accumulator + entryColor);
+                        fbPixels = (ushort)(accumulator + Unsafe.Add(ref colorsRef, i));
                         fbPixels = ref Unsafe.Add(ref fbPixels, 1);
                     }
-
-                    accumulator += entryColorsRef;
+                    // Advance the running accumulator by the entry's total delta. When all
+                    // chunk bits emitted (colorCount==NonRootBits) the last prefix sum is the
+                    // total; otherwise colors[colorCount] is the fill slot holding the total.
+                    accumulator = (ushort)(accumulator + Unsafe.Add(ref colorsRef, colorCount == NonRootBits ? NonRootBits - 1 : (int)colorCount));
                 }
             }
         }
         while (pixelCount > 0 && Unsafe.IsAddressLessThan(ref stream, ref streamEnd));
-
-        if (stats is not null && maxTableIndex16 > (ulong)stats.StatsComp16MaxTableIndex)
-            stats.StatsComp16MaxTableIndex = (long)maxTableIndex16;
 
         if (pixelCount > 0)
         {
@@ -951,37 +990,44 @@ internal static class DlDecoder
             return 0;
         }
 
-        DecompEntry[] table = new DecompEntry[length * 2];
+        // Store the compact raw binary tree — length*2 nodes, 4 bytes each, max 32KB.
+        // The decode hot loop walks this bit-by-bit for non-root states (L2 hit ~8 cycles/bit).
+        DecompEntry[] tree = new DecompEntry[length * 2];
         ReadOnlySpan<byte> tableBytes = MemoryMarshal.CreateReadOnlySpan(in stream, length * DecompEntry.ByteLength);
         for (int i = 0; i < length; i++)
         {
-            (table[i * 2], table[(i * 2) + 1]) = DecompEntry.Parse(
+            (tree[i * 2], tree[(i * 2) + 1]) = DecompEntry.Parse(
                 tableBytes.Slice(i * DecompEntry.ByteLength, DecompEntry.ByteLength),
                 length);
         }
+        memory.CompactTree = tree;
 
-        const int LookupBitCount = 8;
-        ReallocArray(ref memory.DecompTable8Lookup, length * (1 << LookupBitCount));
-        ReallocArray(ref memory.DecompTable8Colors, length * (1 << LookupBitCount) * LookupBitCount);
-        ReallocArray(ref memory.DecompTable16Lookup, length * (1 << LookupBitCount));
-        ReallocArray(ref memory.DecompTable16Colors, length * (1 << LookupBitCount) * LookupBitCount);
-        BuildTableLookup(table, memory.DecompTable8Lookup, memory.DecompTable8Colors, 0, 0);
-        BuildTableLookup(table, memory.DecompTable16Lookup, memory.DecompTable16Colors, 8, 8);
-
-        const int HotSize = 1 << LookupBitCount;  // 256
+        // Pre-expand the root-state row 8 bits wide into hot tables that stay in L1 (~4.5KB
+        // each), used when an input byte starts at root (the common case): 1 load/byte.
+        // comp8 root = state 0, comp16 root = state 8.
+        const int HotSize = 256;
         ReallocArray(ref memory.HotLookup16, HotSize);
-        ReallocArray(ref memory.HotColors16, HotSize * LookupBitCount);
+        ReallocArray(ref memory.HotColors16, HotSize * 8);
         ReallocArray(ref memory.HotLookup8,  HotSize);
-        ReallocArray(ref memory.HotColors8,  HotSize * LookupBitCount);
-        for (int i = 0; i < HotSize; i++)
-        {
-            memory.HotLookup16![i] = memory.DecompTable16Lookup![8 * HotSize + i].RawValue;
-            memory.HotLookup8![i]  = memory.DecompTable8Lookup![0 * HotSize + i].RawValue;
-        }
-        memory.DecompTable16Colors!.AsSpan(8 * HotSize * LookupBitCount, HotSize * LookupBitCount)
-            .CopyTo(memory.HotColors16!);
-        memory.DecompTable8Colors!.AsSpan(0 * HotSize * LookupBitCount, HotSize * LookupBitCount)
-            .CopyTo(memory.HotColors8!);
+        ReallocArray(ref memory.HotColors8,  HotSize * 8);
+        BuildRow(tree, memory.HotLookup16!, memory.HotColors16!, rootState: 8, state: 8, bits: 8);
+        BuildRow(tree, memory.HotLookup8!,  memory.HotColors8!,  rootState: 0, state: 0, bits: 8);
+
+        // Pre-expand every reachable state NonRootBits wide for the non-root decode path.
+        // Indexed by (state << NonRootBits) | chunk; allocated sparsely by raw state number
+        // so the index space matches the residual states produced by the hot table above.
+        int rows = length;
+        int rowEntries = 1 << NonRootBits;
+        ReallocArray(ref memory.NonRootLookup16, rows * rowEntries);
+        ReallocArray(ref memory.NonRootColors16, rows * rowEntries * NonRootBits);
+        ReallocArray(ref memory.NonRootLookup8,  rows * rowEntries);
+        ReallocArray(ref memory.NonRootColors8,  rows * rowEntries * NonRootBits);
+        bool[] visited = new bool[length];
+        memory.ReachableStates16 = BuildReachable(tree, memory.NonRootLookup16!, memory.NonRootColors16!, rootState: 8, visited);
+        Array.Clear(visited);
+        memory.ReachableStates8 = BuildReachable(tree, memory.NonRootLookup8!, memory.NonRootColors8!, rootState: 0, visited);
+
+        Logger.LogDebug($"{nameof(LoadDecompTable)}: length={length} reachable16={memory.ReachableStates16} reachable8={memory.ReachableStates8} nonRootBits={NonRootBits}");
 
         return 8 + (length * DecompEntry.ByteLength);
 
@@ -989,71 +1035,76 @@ internal static class DlDecoder
             where T : unmanaged
         {
             if (array is null || array.Length != length)
-            {
                 array = GC.AllocateArray<T>(length, true);
-            }
             else
-            {
                 array.AsSpan().Clear();
-            }
         }
 
-        static void BuildTableLookup<T>(DecompEntry[] table, DlMemory.DecompLookupEntry[] tableLookup, T[] tableColors, uint tableIndex, uint startIndex)
+        // Build the NonRootBits-wide rows for rootState and every state transitively
+        // reachable from it. Returns the number of rows built (reachable state count).
+        static int BuildReachable<T>(DecompEntry[] tree, ushort[] lookup, T[] colors, uint rootState, bool[] visited)
             where T : unmanaged, IBinaryInteger<T>
         {
-            Span<DlMemory.DecompLookupEntry> subLookup = tableLookup.AsSpan((int)tableIndex * (1 << LookupBitCount), 1 << LookupBitCount);
-            if (subLookup[0].IsSet)
-            {
-                return;
-            }
+            int count = 0;
+            BuildState(rootState);
+            return count;
 
-            Span<T> subColors = tableColors.AsSpan((int)tableIndex * (1 << LookupBitCount) * LookupBitCount, (1 << LookupBitCount) * LookupBitCount);
-            for (int i = 0; i < subLookup.Length; i++)
+            void BuildState(uint state)
             {
-                DlMemory.DecompLookupEntry entry = Lookup(
-                    table,
-                    subColors.Slice(i * LookupBitCount, LookupBitCount),
-                    tableIndex,
-                    startIndex,
-                    (uint)i,
-                    LookupBitCount);
+                if (visited[state]) return;
+                visited[state] = true;
+                count++;
 
-                subLookup[i] = entry;
-                if (entry.Jump != 0 && entry.Jump != startIndex)
+                for (uint chunk = 0; chunk < (1u << NonRootBits); chunk++)
                 {
-                    BuildTableLookup<T>(table, tableLookup, tableColors, entry.Jump, startIndex);
+                    int idx = (int)((state << NonRootBits) | chunk);
+                    uint next = BuildRowAt(tree, lookup, colors, rootState, state, chunk, NonRootBits, idx);
+                    if (!visited[next])
+                        BuildState(next);
                 }
             }
         }
 
-        static DlMemory.DecompLookupEntry Lookup<T>(DecompEntry[] table, Span<T> colors, uint tableIndex, uint startIndex, uint bits, uint bitCount)
+        // Build a single (state, chunk) entry: walk `bits` input bits from `state`,
+        // store the emitted prefix-sum colors, return the residual next state.
+        static uint BuildRowAt<T>(DecompEntry[] tree, ushort[] lookup, T[] colors, uint rootState, uint state, uint chunkBits, int bits, int idx)
             where T : unmanaged, IBinaryInteger<T>
         {
+            uint tableIndex = state;
             uint accumulator = 0;
             int colorCount = 0;
-            do
+            uint b = chunkBits;
+            Span<T> entryColors = colors.AsSpan(idx * bits, bits);
+
+            for (int bitPos = 0; bitPos < bits; bitPos++)
             {
-                do
-                {
-                    DecompEntry entry = table[(tableIndex << 1) + (bits & 1)];
-                    accumulator += entry.Color;
-                    tableIndex = entry.Jump;
-                    bits >>= 1;
-                    bitCount--;
-                }
-                while (tableIndex != 0 && bitCount != 0);
+                DecompEntry node = tree[(tableIndex << 1) + (b & 1)];
+                accumulator += node.Color;
+                tableIndex = node.Jump;
+                b >>= 1;
 
                 if (tableIndex == 0)
                 {
-                    colors[colorCount] = T.CreateTruncating(accumulator);
+                    entryColors[colorCount] = T.CreateTruncating(accumulator);
                     colorCount++;
-                    tableIndex = startIndex;
+                    tableIndex = rootState;
                 }
             }
-            while (bitCount != 0);
 
-            colors[colorCount..LookupBitCount].Fill(T.CreateTruncating(accumulator));
-            return new((ushort)colorCount, (ushort)tableIndex);
+            // Fill trailing slots with the running total so the decode loop reads
+            // colors[colorCount] as the entry's total delta (residual accumulator).
+            entryColors[colorCount..].Fill(T.CreateTruncating(accumulator));
+            lookup[idx] = (ushort)((colorCount & 0xFu) | (tableIndex << 4));
+            return tableIndex;
+        }
+
+        // Build a single row at the canonical index (state << bits). Used for the 8-bit
+        // hot tables where the array is indexed directly by input byte.
+        static void BuildRow<T>(DecompEntry[] tree, ushort[] lookup, T[] colors, uint rootState, uint state, int bits)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            for (uint chunk = 0; chunk < (1u << bits); chunk++)
+                BuildRowAt(tree, lookup, colors, rootState, state, chunk, bits, (int)chunk);
         }
     }
 
