@@ -339,12 +339,8 @@ internal static class DlDecoder
         }
 
         ref byte fbDst = ref Unsafe.Add(ref fb, address);
-        if (!MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
-                .SequenceEqual(MemoryMarshal.CreateReadOnlySpan(in fbDst, pixelCount)))
-        {
-            MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
-                .CopyTo(MemoryMarshal.CreateSpan(ref fbDst, pixelCount));
-        }
+        MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
+            .CopyTo(MemoryMarshal.CreateSpan(ref fbDst, pixelCount));
 
         return 4 + pixelCount;
     }
@@ -375,14 +371,10 @@ internal static class DlDecoder
         }
 
         ref ushort fbPixels16 = ref Unsafe.As<byte, ushort>(ref Unsafe.Add(ref fb, address));
-        ref ushort streamPixels16 = ref Unsafe.As<byte, ushort>(ref stream);
-        if (!ColorConvert.SpanMatchesBe(ref streamPixels16, ref fbPixels16, pixelCount))
-        {
-            ColorConvert.CopyRgb565BeToRgb565Le(
-                ref Unsafe.As<byte, ushort>(ref stream),
-                ref Unsafe.As<byte, ushort>(ref Unsafe.Add(ref fb, address)),
-                pixelCount);
-        }
+        ColorConvert.CopyRgb565BeToRgb565Le(
+            ref Unsafe.As<byte, ushort>(ref stream),
+            ref fbPixels16,
+            pixelCount);
 
         return 4 + (pixelCount * sizeof(ushort));
     }
@@ -420,11 +412,7 @@ internal static class DlDecoder
             stream = ref Unsafe.Add(ref stream, 2);
             int pixelCount = Wrap256((byte)word);
             byte fillByte = (byte)(word >> 8);
-            if (!ColorConvert.SpanAllEqual(ref fbPixels, pixelCount, fillByte))
-            {
-                MemoryMarshal.CreateSpan(ref fbPixels, pixelCount).Fill(fillByte);
-            }
-
+            MemoryMarshal.CreateSpan(ref fbPixels, pixelCount).Fill(fillByte);
             fbPixels = ref Unsafe.Add(ref fbPixels, pixelCount);
             totalCount -= pixelCount;
         }
@@ -466,11 +454,7 @@ internal static class DlDecoder
             stream = ref Unsafe.Add(ref stream, 1);
             ushort pixelValue = Unsafe.As<byte, ushort>(ref stream);
             stream = ref Unsafe.Add(ref stream, 2);
-            if (!ColorConvert.SpanAllEqual(ref fbPixels, pixelCount, pixelValue))
-            {
-                MemoryMarshal.CreateSpan(ref fbPixels, pixelCount).Fill(pixelValue);
-            }
-
+            MemoryMarshal.CreateSpan(ref fbPixels, pixelCount).Fill(pixelValue);
             fbPixels = ref Unsafe.Add(ref fbPixels, pixelCount);
             totalCount -= pixelCount;
         }
@@ -570,12 +554,8 @@ internal static class DlDecoder
                 return 0;
             }
 
-            if (!MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
-                    .SequenceEqual(MemoryMarshal.CreateReadOnlySpan(in fbPixels, pixelCount)))
-            {
-                MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
-                    .CopyTo(MemoryMarshal.CreateSpan(ref fbPixels, pixelCount));
-            }
+            MemoryMarshal.CreateReadOnlySpan(in stream, pixelCount)
+                .CopyTo(MemoryMarshal.CreateSpan(ref fbPixels, pixelCount));
 
             stream = ref Unsafe.Add(ref stream, pixelCount);
             fbPixels = ref Unsafe.Add(ref fbPixels, pixelCount);
@@ -593,10 +573,7 @@ internal static class DlDecoder
                 if (repeat > 0)
                 {
                     byte repeatPixel = Unsafe.Add(ref stream, -2);
-                    if (!ColorConvert.SpanAllEqual(ref fbPixels, repeat, repeatPixel))
-                    {
-                        MemoryMarshal.CreateSpan(ref fbPixels, repeat).Fill(repeatPixel);
-                    }
+                    MemoryMarshal.CreateSpan(ref fbPixels, repeat).Fill(repeatPixel);
 
                     fbPixels = ref Unsafe.Add(ref fbPixels, repeat);
                     totalPixelCount -= repeat;
@@ -646,7 +623,6 @@ internal static class DlDecoder
             ref ushort srcPixels = ref Unsafe.As<byte, ushort>(ref stream);
 
             // Merged fill fast-path: single raw pixel + non-zero repeat → one fill of (1+repeat) pixels.
-            // The repeat always reuses the last raw pixel, so when pixelCount==1 they are the same value.
             if (pixelCount == 1 &&
                 totalPixelCount > 1 &&
                 Unsafe.IsAddressLessThan(ref Unsafe.Add(ref stream, 2), ref streamEnd))
@@ -655,15 +631,10 @@ internal static class DlDecoder
                 if (peekRepeat > 0)
                 {
                     ushort fillValueLe = BinaryPrimitives.ReverseEndianness(srcPixels);
-                    int fillCount = 1 + peekRepeat;
-                    if (!ColorConvert.SpanAllEqual(ref fbPixels, fillCount, fillValueLe))
-                    {
-                        MemoryMarshal.CreateSpan(ref fbPixels, fillCount).Fill(fillValueLe);
-                    }
-
+                    MemoryMarshal.CreateSpan(ref fbPixels, 1 + peekRepeat).Fill(fillValueLe);
                     stream = ref Unsafe.Add(ref stream, 3); // 2-byte pixel + 1 repeat byte
-                    fbPixels = ref Unsafe.Add(ref fbPixels, fillCount);
-                    totalPixelCount -= fillCount;
+                    fbPixels = ref Unsafe.Add(ref fbPixels, 1 + peekRepeat);
+                    totalPixelCount -= 1 + peekRepeat;
                     if (totalPixelCount <= 0)
                     {
                         break;
@@ -674,11 +645,8 @@ internal static class DlDecoder
             }
 
             ushort lastPixelBe = Unsafe.Add(ref srcPixels, pixelCount - 1);
-            if (!ColorConvert.SpanMatchesBe(ref srcPixels, ref fbPixels, pixelCount))
-            {
-                ColorConvert.CopyRgb565BeToRgb565Le(
-                    ref Unsafe.As<byte, ushort>(ref stream), ref fbPixels, pixelCount);
-            }
+            ColorConvert.CopyRgb565BeToRgb565Le(
+                ref Unsafe.As<byte, ushort>(ref stream), ref fbPixels, pixelCount);
 
             stream = ref Unsafe.Add(ref stream, pixelCount * 2);
             fbPixels = ref Unsafe.Add(ref fbPixels, pixelCount);
@@ -693,12 +661,7 @@ internal static class DlDecoder
             stream = ref Unsafe.Add(ref stream, 1);
             if (repeat > 0)
             {
-                ushort fillValueLe = BinaryPrimitives.ReverseEndianness(lastPixelBe);
-                if (!ColorConvert.SpanAllEqual(ref fbPixels, repeat, fillValueLe))
-                {
-                    MemoryMarshal.CreateSpan(ref fbPixels, repeat).Fill(fillValueLe);
-                }
-
+                MemoryMarshal.CreateSpan(ref fbPixels, repeat).Fill(BinaryPrimitives.ReverseEndianness(lastPixelBe));
                 fbPixels = ref Unsafe.Add(ref fbPixels, repeat);
                 totalPixelCount -= repeat;
                 if (totalPixelCount <= 0)
