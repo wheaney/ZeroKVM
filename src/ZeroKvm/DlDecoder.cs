@@ -16,10 +16,11 @@ internal static class DlDecoder
      * consumed in 8/NonRootBits chunks, so this is the number of serial dependent
      * loads per non-root byte (vs 8 for a bit-by-bit walk). Must divide 8 (2 or 4).
      * Footprint per reachable state = 2^NonRootBits * (2B + NonRootBits*colorSize).
-     * k=2 fits L2 for any legal table (≤96KB worst case); k=4 only if reachable
-     * states stay in the low hundreds — check the ReachableStates* diagnostic.
+     * k=4: comp16 has ~286 reachable states → ~27KB non-root table, fits A72 L2.
+     *      comp8 has ~9 reachable states → trivially small.
+     * k=2 is the safe fallback if a wildly different host sends far more states.
      */
-    private const int NonRootBits = 2;
+    private const int NonRootBits = 4;
 
     private enum Commands : ushort
     {
