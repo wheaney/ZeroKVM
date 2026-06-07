@@ -215,8 +215,10 @@ public static unsafe class NativeExports
             DlMemory memory = GetContext(handle).Memory;
             long packets = memory.StatsPackets;
 
-            if (outWriteComp16 is not null) *outWriteComp16 = memory.StatsWriteComp16Pixels | ((long)memory.StatsComp16MaxTableIndex << 32);
-            if (outWriteComp8  is not null) *outWriteComp8  = memory.StatsWriteComp8Pixels  | ((long)memory.StatsComp8MaxTableIndex  << 32);
+            // Pack reachable state count into high 32 bits — printed as "maxstate" by udl_runtime.c.
+            // ReachableStates is static after LoadDecompTable; pixel count in low 32 bits.
+            if (outWriteComp16 is not null) *outWriteComp16 = memory.StatsWriteComp16Pixels | ((long)memory.ReachableStates16 << 32);
+            if (outWriteComp8  is not null) *outWriteComp8  = memory.StatsWriteComp8Pixels  | ((long)memory.ReachableStates8  << 32);
             if (outWriteRlx16  is not null) *outWriteRlx16  = memory.StatsWriteRlx16Pixels;
             if (outWrite16     is not null) *outWrite16     = memory.StatsWrite16Pixels;
             if (outFill16      is not null) *outFill16      = memory.StatsFill16Pixels;
@@ -226,8 +228,6 @@ public static unsafe class NativeExports
             memory.StatsPackets              = 0;
             memory.StatsWriteComp16Pixels    = 0;
             memory.StatsWriteComp8Pixels     = 0;
-            memory.StatsComp16MaxTableIndex  = 0;
-            memory.StatsComp8MaxTableIndex   = 0;
             memory.StatsWriteRlx16Pixels     = 0;
             memory.StatsWrite16Pixels        = 0;
             memory.StatsFill16Pixels         = 0;
