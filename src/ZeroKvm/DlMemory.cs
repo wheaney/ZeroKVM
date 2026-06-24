@@ -79,51 +79,6 @@ internal class DlMemory
         int end = byteAddress + byteCount;
         if (end > _dirtyByteMax)
             _dirtyByteMax = end;
-
-        /* Resolve the touched rows in 16-bit-plane terms. A write command lands
-         * in either the 16-bit (RGB565) plane or the 8-bit (RGB323) plane; both
-         * describe the same logical rows but at different base/stride. Map each
-         * plane's byte address to a row so the bitset is plane-agnostic. */
-        int rowFirst, rowLast;
-        if (_fb16LineStride > 0 && byteAddress >= _fb16BaseOffset &&
-            byteAddress < _fb16BaseOffset + _fb16LineStride * MaxRows)
-        {
-            int rel = byteAddress - _fb16BaseOffset;
-            rowFirst = rel / _fb16LineStride;
-            rowLast = (end - 1 - _fb16BaseOffset) / _fb16LineStride;
-        }
-        else if (_fb8LineStride > 0 && byteAddress >= _fb8BaseOffset &&
-                 byteAddress < _fb8BaseOffset + _fb8LineStride * MaxRows)
-        {
-            int rel = byteAddress - _fb8BaseOffset;
-            rowFirst = rel / _fb8LineStride;
-            rowLast = (end - 1 - _fb8BaseOffset) / _fb8LineStride;
-        }
-        else
-        {
-            return;
-        }
-
-        if (rowFirst < 0)
-            rowFirst = 0;
-        if (rowLast >= MaxRows)
-            rowLast = MaxRows - 1;
-        if (rowLast < rowFirst)
-            return;
-
-        if (rowFirst < _dirtyRowMin)
-            _dirtyRowMin = rowFirst;
-        if (rowLast > _dirtyRowMax)
-            _dirtyRowMax = rowLast;
-        for (int r = rowFirst; r <= rowLast; r++)
-            _dirtyRowBits[r >> 3] |= (byte)(1 << (r & 7));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsRowDirty(int row)
-    {
-        return (uint)row < MaxRows &&
-               (_dirtyRowBits[row >> 3] & (byte)(1 << (row & 7))) != 0;
     }
 
     public void ResetDirtyRange()
