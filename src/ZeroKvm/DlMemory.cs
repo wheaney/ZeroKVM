@@ -68,19 +68,12 @@ internal class DlMemory
     private readonly byte[] _dirtyRowBits = new byte[(MaxRows + 7) / 8];
     private int _dirtyRowMin = int.MaxValue;
     private int _dirtyRowMax = int.MinValue;
-    private long _lastDirtyDebugMs;
-    private int _markDirtyCalls, _markRowSetCalls, _markMissCalls;
-    private int _dbgBaseAtMark = -1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
     {
-        _markDirtyCalls++;
         if (byteCount <= 0)
             return;
-        /* DEBUG: snapshot the scanout base as seen at write time, to compare with
-         * the base at sync time and the actual write address. */
-        _dbgBaseAtMark = _fb16BaseOffset;
         if (byteAddress < _dirtyByteMin)
             _dirtyByteMin = byteAddress;
         int end = byteAddress + byteCount;
@@ -108,7 +101,6 @@ internal class DlMemory
         }
         else
         {
-            _markMissCalls++;
             return;
         }
 
@@ -119,7 +111,6 @@ internal class DlMemory
         if (rowLast < rowFirst)
             return;
 
-        _markRowSetCalls++;
         if (rowFirst < _dirtyRowMin)
             _dirtyRowMin = rowFirst;
         if (rowLast > _dirtyRowMax)
@@ -427,40 +418,31 @@ internal class DlMemory
             return default;
         }
 
-        bool haveDirtyRows = _dirtyRowMin <= _dirtyRowMax;
-        int rowFirst = haveDirtyRows ? Math.Max(0, _dirtyRowMin) : 0;
-        int rowLast = haveDirtyRows ? Math.Min(height, _dirtyRowMax + 1) : height;
-        byte[]? rowBits = haveDirtyRows ? _dirtyRowBits : null;
-
-        /* TEMP DIAGNOSTIC: confirm this build is deployed and see the real dirty
-         * range. Throttled to ~1/sec. Remove once avg_dirty_rows is confirmed. */
-        if (Environment.GetEnvironmentVariable("ZEROKVM_DIRTY_DEBUG") is not null)
-        {
-            long nowTicks = Environment.TickCount64;
-            if (nowTicks - _lastDirtyDebugMs >= 1000)
-            {
-                _lastDirtyDebugMs = nowTicks;
-                Console.Error.WriteLine(
-                    $"[dirty16] have={haveDirtyRows} rowMin={_dirtyRowMin} rowMax={_dirtyRowMax} " +
-                    $"-> rows[{rowFirst},{rowLast}) h={height} " +
-                    $"byteMin={_dirtyByteMin} byteMax={_dirtyByteMax} baseAtMark={_dbgBaseAtMark} markCalls={_markDirtyCalls} markRowSet={_markRowSetCalls} markMiss={_markMissCalls} " +
-                    $"fb16Base={_fb16BaseOffset} fb16Stride={_fb16LineStride} " +
-                    $"fb8Base={_fb8BaseOffset} fb8Stride={_fb8LineStride} depth={ColorDepth}");
-                _markDirtyCalls = _markRowSetCalls = _markMissCalls = 0;
-            }
-        }
-
+        /*
+         * Damage is computed by diffing the CURRENT scanout buffer against the
+         * per-row diff plane — NOT from MarkDirty's write addresses. The host
+         * double-buffers (BaseOffset16 flips each frame) and the decode thread
+         * runs ahead of this throttled sync, so write addresses target back
+         * buffers unrelated to _fb16BaseOffset; mapping them to rows of the buffer
+         * we actually copy is impossible. The diff is buffer-position-independent:
+         * it compares what we're about to copy (at _fb16BaseOffset) against what we
+         * last copied (_frameBufferDiff16), so it reports exactly the rows that
+         * changed in the displayed image, regardless of which buffer was written.
+         */
         ResetDirtyRange();
 
         ReadOnlySpan<ushort> source = MemoryMarshal.Cast<byte, ushort>(_frameBuffer.AsSpan(_fb16BaseOffset, fb16Size));
+        Span<ushort> diff = _frameBufferDiff16.AsSpan(0, lineStride * height);
         int modifiedY1 = 0, modifiedY2 = 0;
-        for (int y = rowFirst; y < rowLast; y++)
+        for (int y = 0; y < height; y++)
         {
-            if (rowBits != null && (rowBits[y >> 3] & (byte)(1 << (y & 7))) == 0)
+            ReadOnlySpan<ushort> srcRow = source.Slice(y * lineStride, copyWidth);
+            Span<ushort> diffRow = diff.Slice(y * lineStride, copyWidth);
+            if (srcRow.SequenceEqual(diffRow))
                 continue;
 
-            source.Slice(y * lineStride, copyWidth)
-                .CopyTo(fb.Slice(y * stridePixels, copyWidth));
+            srcRow.CopyTo(diffRow);
+            srcRow.CopyTo(fb.Slice(y * stridePixels, copyWidth));
 
             if (modifiedY2 == 0) { modifiedY1 = y; modifiedY2 = y + 1; } else { modifiedY2 = y + 1; }
         }
