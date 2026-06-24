@@ -69,10 +69,12 @@ internal class DlMemory
     private int _dirtyRowMin = int.MaxValue;
     private int _dirtyRowMax = int.MinValue;
     private long _lastDirtyDebugMs;
+    private int _markDirtyCalls, _markRowSetCalls, _markMissCalls;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
     {
+        _markDirtyCalls++;
         if (byteCount <= 0)
             return;
         if (byteAddress < _dirtyByteMin)
@@ -102,6 +104,7 @@ internal class DlMemory
         }
         else
         {
+            _markMissCalls++;
             return;
         }
 
@@ -112,6 +115,7 @@ internal class DlMemory
         if (rowLast < rowFirst)
             return;
 
+        _markRowSetCalls++;
         if (rowFirst < _dirtyRowMin)
             _dirtyRowMin = rowFirst;
         if (rowLast > _dirtyRowMax)
@@ -435,8 +439,10 @@ internal class DlMemory
                 Console.Error.WriteLine(
                     $"[dirty16] have={haveDirtyRows} rowMin={_dirtyRowMin} rowMax={_dirtyRowMax} " +
                     $"-> rows[{rowFirst},{rowLast}) h={height} " +
+                    $"byteMin={_dirtyByteMin} byteMax={_dirtyByteMax} markCalls={_markDirtyCalls} markRowSet={_markRowSetCalls} markMiss={_markMissCalls} " +
                     $"fb16Base={_fb16BaseOffset} fb16Stride={_fb16LineStride} " +
                     $"fb8Base={_fb8BaseOffset} fb8Stride={_fb8LineStride} depth={ColorDepth}");
+                _markDirtyCalls = _markRowSetCalls = _markMissCalls = 0;
             }
         }
 
