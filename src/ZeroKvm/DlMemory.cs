@@ -385,7 +385,19 @@ internal class DlMemory
         };
     }
 
-    public void CopyFrameBuffer16To(Span<ushort> fb, int stridePixels)
+    /*
+     * Raw RGB565 copy used by the live scanout path (GPU does RGB565->RGB in the
+     * shader, so no diff/convert here). This is the path that actually runs on
+     * the box — NOT CopyFrameBufferTo, which serves the abandoned XRGB8888 path.
+     *
+     * Damage comes straight from the DisplayLink protocol: MarkDirty's per-row
+     * bitset tells us exactly which rows the decoder wrote, so we copy only those
+     * and report a tight ModifiedY1/Y2. No per-pixel diff — there's no diff buffer
+     * to keep coherent on this path, and the protocol's row-granular damage is
+     * enough to stop the full-frame WC blit. X stays full-width (rows dominate
+     * the blit cost; tight columns would need a diff or 2-D protocol damage).
+     */
+    public FrameArea CopyFrameBuffer16To(Span<ushort> fb, int stridePixels)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(stridePixels, 1);
 
@@ -394,7 +406,7 @@ internal class DlMemory
         int height = _verticalResolution;
         if (lineStride <= 0 || width <= 0 || height <= 0)
         {
-            return;
+            return default;
         }
 
         int copyWidth = Math.Min(Math.Min(width, stridePixels), lineStride);
@@ -403,15 +415,39 @@ internal class DlMemory
         int fb16Size = lineStride * height * 2;
         if (_fb16BaseOffset < 0 || (long)_fb16BaseOffset + fb16Size > _frameBuffer.Length)
         {
-            return;
+            return default;
         }
 
+        bool haveDirtyRows = _dirtyRowMin <= _dirtyRowMax;
+        int rowFirst = haveDirtyRows ? Math.Max(0, _dirtyRowMin) : 0;
+        int rowLast = haveDirtyRows ? Math.Min(height, _dirtyRowMax + 1) : height;
+        byte[]? rowBits = haveDirtyRows ? _dirtyRowBits : null;
+
+        ResetDirtyRange();
+
         ReadOnlySpan<ushort> source = MemoryMarshal.Cast<byte, ushort>(_frameBuffer.AsSpan(_fb16BaseOffset, fb16Size));
-        for (int y = 0; y < height; y++)
+        int modifiedY1 = 0, modifiedY2 = 0;
+        for (int y = rowFirst; y < rowLast; y++)
         {
+            if (rowBits != null && (rowBits[y >> 3] & (byte)(1 << (y & 7))) == 0)
+                continue;
+
             source.Slice(y * lineStride, copyWidth)
                 .CopyTo(fb.Slice(y * stridePixels, copyWidth));
+
+            if (modifiedY2 == 0) { modifiedY1 = y; modifiedY2 = y + 1; } else { modifiedY2 = y + 1; }
         }
+
+        return new()
+        {
+            Width = (ushort)width,
+            Height = (ushort)height,
+            LineStride = (ushort)lineStride,
+            ModifiedX1 = 0,
+            ModifiedY1 = (ushort)modifiedY1,
+            ModifiedX2 = (ushort)(modifiedY2 > 0 ? width : 0),
+            ModifiedY2 = (ushort)modifiedY2,
+        };
     }
 
     private static (int X1, int Y1, int X2, int Y2) CopyPixels16(

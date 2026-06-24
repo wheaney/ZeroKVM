@@ -106,21 +106,36 @@ public static unsafe class NativeExports
             NativeBridgeContext context = GetContext(handle);
             DlMemory memory = context.Memory;
             FrameArea frameArea = default;
+            bool haveFrameArea = false;
 
+            /* NOTE: in production only ONE destination is supplied (the renderer
+             * passes rgb565, xrgb8888=null). Both consume-and-reset the dirty
+             * range, so if both are ever requested at once the second sees an
+             * empty range and copies nothing — don't rely on dual output. */
             if (xrgb8888 is not null && xrgb8888StridePixels != 0)
             {
                 Span<uint> xrgb = new(xrgb8888, checked((int)(xrgb8888StridePixels * (uint)context.MaxHeight)));
                 frameArea = memory.CopyFrameBufferTo(xrgb, checked((int)xrgb8888StridePixels));
-            }
-            else
-            {
-                frameArea = CreateFullFrameArea(memory);
+                haveFrameArea = true;
             }
 
             if (rgb565 is not null && rgb565StridePixels != 0)
             {
                 Span<ushort> rgb = new(rgb565, checked((int)(rgb565StridePixels * (uint)context.MaxHeight)));
-                memory.CopyFrameBuffer16To(rgb, checked((int)rgb565StridePixels));
+                /* The RGB565 path consumes the dirty-row range, so it must run
+                 * BEFORE we'd fall back to a full-frame area, and its tight
+                 * FrameArea is the damage we report when xrgb8888 was skipped. */
+                FrameArea rgbArea = memory.CopyFrameBuffer16To(rgb, checked((int)rgb565StridePixels));
+                if (!haveFrameArea)
+                {
+                    frameArea = rgbArea;
+                    haveFrameArea = true;
+                }
+            }
+
+            if (!haveFrameArea)
+            {
+                frameArea = CreateFullFrameArea(memory);
             }
 
             if (area is not null)
