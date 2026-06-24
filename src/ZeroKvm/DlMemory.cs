@@ -70,6 +70,7 @@ internal class DlMemory
     private int _dirtyRowMax = int.MinValue;
     private long _lastDirtyDebugMs;
     private int _markDirtyCalls, _markRowSetCalls, _markMissCalls;
+    private int _dbgBaseAtMark = -1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
@@ -77,6 +78,9 @@ internal class DlMemory
         _markDirtyCalls++;
         if (byteCount <= 0)
             return;
+        /* DEBUG: snapshot the scanout base as seen at write time, to compare with
+         * the base at sync time and the actual write address. */
+        _dbgBaseAtMark = _fb16BaseOffset;
         if (byteAddress < _dirtyByteMin)
             _dirtyByteMin = byteAddress;
         int end = byteAddress + byteCount;
@@ -439,7 +443,7 @@ internal class DlMemory
                 Console.Error.WriteLine(
                     $"[dirty16] have={haveDirtyRows} rowMin={_dirtyRowMin} rowMax={_dirtyRowMax} " +
                     $"-> rows[{rowFirst},{rowLast}) h={height} " +
-                    $"byteMin={_dirtyByteMin} byteMax={_dirtyByteMax} markCalls={_markDirtyCalls} markRowSet={_markRowSetCalls} markMiss={_markMissCalls} " +
+                    $"byteMin={_dirtyByteMin} byteMax={_dirtyByteMax} baseAtMark={_dbgBaseAtMark} markCalls={_markDirtyCalls} markRowSet={_markRowSetCalls} markMiss={_markMissCalls} " +
                     $"fb16Base={_fb16BaseOffset} fb16Stride={_fb16LineStride} " +
                     $"fb8Base={_fb8BaseOffset} fb8Stride={_fb8LineStride} depth={ColorDepth}");
                 _markDirtyCalls = _markRowSetCalls = _markMissCalls = 0;
