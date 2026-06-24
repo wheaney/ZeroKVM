@@ -68,6 +68,7 @@ internal class DlMemory
     private readonly byte[] _dirtyRowBits = new byte[(MaxRows + 7) / 8];
     private int _dirtyRowMin = int.MaxValue;
     private int _dirtyRowMax = int.MinValue;
+    private long _lastDirtyDebugMs;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
@@ -422,6 +423,22 @@ internal class DlMemory
         int rowFirst = haveDirtyRows ? Math.Max(0, _dirtyRowMin) : 0;
         int rowLast = haveDirtyRows ? Math.Min(height, _dirtyRowMax + 1) : height;
         byte[]? rowBits = haveDirtyRows ? _dirtyRowBits : null;
+
+        /* TEMP DIAGNOSTIC: confirm this build is deployed and see the real dirty
+         * range. Throttled to ~1/sec. Remove once avg_dirty_rows is confirmed. */
+        if (Environment.GetEnvironmentVariable("ZEROKVM_DIRTY_DEBUG") is not null)
+        {
+            long nowTicks = Environment.TickCount64;
+            if (nowTicks - _lastDirtyDebugMs >= 1000)
+            {
+                _lastDirtyDebugMs = nowTicks;
+                Console.Error.WriteLine(
+                    $"[dirty16] have={haveDirtyRows} rowMin={_dirtyRowMin} rowMax={_dirtyRowMax} " +
+                    $"-> rows[{rowFirst},{rowLast}) h={height} " +
+                    $"fb16Base={_fb16BaseOffset} fb16Stride={_fb16LineStride} " +
+                    $"fb8Base={_fb8BaseOffset} fb8Stride={_fb8LineStride} depth={ColorDepth}");
+            }
+        }
 
         ResetDirtyRange();
 
