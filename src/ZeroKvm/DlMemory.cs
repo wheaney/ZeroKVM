@@ -53,9 +53,21 @@ internal class DlMemory
     private readonly byte[] _compWrittenBits;
     private const int CompWrittenGranularity = 256;
 
-    /* Dirty byte range tracked by MarkDirty(); reset by ResetDirtyRange(). */
+    /* Dirty byte range tracked by MarkDirty(); reset by ResetDirtyRange().
+     * Kept for the empty/fallback decision in CopyFrameBufferTo. */
     private int _dirtyByteMin = int.MaxValue;
     private int _dirtyByteMax = int.MinValue;
+
+    /* Per-row dirty bitset (1 bit/row), keyed on the 16-bit-plane row geometry.
+     * Set by MarkDirty(), consumed and cleared at CopyFrameBufferTo time. This
+     * is what keeps the converted/blitted region TIGHT: a single 1D byte min/max
+     * spanning a cursor at the top and a caret at the bottom would otherwise mark
+     * the whole frame dirty. We track the actual rows instead so we convert/blit
+     * only those, not everything in between. _dirtyRowMin/Max bound the scan. */
+    private const int MaxRows = 2048;
+    private readonly byte[] _dirtyRowBits = new byte[(MaxRows + 7) / 8];
+    private int _dirtyRowMin = int.MaxValue;
+    private int _dirtyRowMax = int.MinValue;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkDirty(int byteAddress, int byteCount)
@@ -67,12 +79,66 @@ internal class DlMemory
         int end = byteAddress + byteCount;
         if (end > _dirtyByteMax)
             _dirtyByteMax = end;
+
+        /* Resolve the touched rows in 16-bit-plane terms. A write command lands
+         * in either the 16-bit (RGB565) plane or the 8-bit (RGB323) plane; both
+         * describe the same logical rows but at different base/stride. Map each
+         * plane's byte address to a row so the bitset is plane-agnostic. */
+        int rowFirst, rowLast;
+        if (_fb16LineStride > 0 && byteAddress >= _fb16BaseOffset &&
+            byteAddress < _fb16BaseOffset + _fb16LineStride * MaxRows)
+        {
+            int rel = byteAddress - _fb16BaseOffset;
+            rowFirst = rel / _fb16LineStride;
+            rowLast = (end - 1 - _fb16BaseOffset) / _fb16LineStride;
+        }
+        else if (_fb8LineStride > 0 && byteAddress >= _fb8BaseOffset &&
+                 byteAddress < _fb8BaseOffset + _fb8LineStride * MaxRows)
+        {
+            int rel = byteAddress - _fb8BaseOffset;
+            rowFirst = rel / _fb8LineStride;
+            rowLast = (end - 1 - _fb8BaseOffset) / _fb8LineStride;
+        }
+        else
+        {
+            return;
+        }
+
+        if (rowFirst < 0)
+            rowFirst = 0;
+        if (rowLast >= MaxRows)
+            rowLast = MaxRows - 1;
+        if (rowLast < rowFirst)
+            return;
+
+        if (rowFirst < _dirtyRowMin)
+            _dirtyRowMin = rowFirst;
+        if (rowLast > _dirtyRowMax)
+            _dirtyRowMax = rowLast;
+        for (int r = rowFirst; r <= rowLast; r++)
+            _dirtyRowBits[r >> 3] |= (byte)(1 << (r & 7));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool IsRowDirty(int row)
+    {
+        return (uint)row < MaxRows &&
+               (_dirtyRowBits[row >> 3] & (byte)(1 << (row & 7))) != 0;
     }
 
     public void ResetDirtyRange()
     {
         _dirtyByteMin = int.MaxValue;
         _dirtyByteMax = int.MinValue;
+        if (_dirtyRowMin <= _dirtyRowMax)
+        {
+            /* Clear only the touched span of the bitset, not the whole array. */
+            int firstByte = _dirtyRowMin >> 3;
+            int lastByte = _dirtyRowMax >> 3;
+            _dirtyRowBits.AsSpan(firstByte, lastByte - firstByte + 1).Clear();
+        }
+        _dirtyRowMin = int.MaxValue;
+        _dirtyRowMax = int.MinValue;
         _compWrittenBits.AsSpan().Clear();
     }
 
@@ -213,26 +279,23 @@ internal class DlMemory
         ArgumentOutOfRangeException.ThrowIfLessThan(fb.Length, checked(stridePixels * height));
 
         /*
-         * Clamp the scan to only the rows touched by the most recent decode pass.
-         * _dirtyByteMin/_dirtyByteMax are byte offsets into FrameBuffer set by
-         * MarkDirty() in DlDecoder.Process(). Converting to row range: each row
-         * is lineStride pixels = lineStride*2 bytes for the 16-bpp plane.
-         * Fall back to the full frame when no dirty range was recorded (e.g.
-         * a flush call after a register-only packet that made no pixel writes).
+         * Scan only the rows the decoder actually touched this pass. The per-row
+         * dirty bitset (set by MarkDirty) localizes the work even when the dirty
+         * rows are scattered (e.g. a cursor near the top and a caret near the
+         * bottom) — the copy loops skip clean rows inside this window via the
+         * bitset, so we convert/blit only the real changes, not the whole span.
+         * Fall back to the full frame when no dirty rows were recorded (e.g. a
+         * flush after a register-only packet that made no pixel writes), so the
+         * initial frame and forced full syncs still paint.
          */
-        int lineStrideBytes = lineStride * sizeof(ushort);
-        int dirtyRowFirst = 0;
-        int dirtyRowLast = height;
-        if (_dirtyByteMin <= _dirtyByteMax && lineStrideBytes > 0 && _fb16BaseOffset >= 0)
-        {
-            int planeByteMin = _dirtyByteMin - _fb16BaseOffset;
-            int planeByteMax = _dirtyByteMax - _fb16BaseOffset;
-            if (planeByteMax > 0 && planeByteMin < fb16Size)
-            {
-                dirtyRowFirst = Math.Max(0, planeByteMin / lineStrideBytes);
-                dirtyRowLast  = Math.Min(height, (planeByteMax + lineStrideBytes - 1) / lineStrideBytes);
-            }
-        }
+        bool haveDirtyRows = _dirtyRowMin <= _dirtyRowMax;
+        int dirtyRowFirst = haveDirtyRows ? Math.Max(0, _dirtyRowMin) : 0;
+        int dirtyRowLast = haveDirtyRows ? Math.Min(height, _dirtyRowMax + 1) : height;
+
+        /* Snapshot the bitset before ResetDirtyRange() clears it. Copy loops use
+         * this to skip clean rows; null means "every row in the window is dirty"
+         * (the full-frame fallback). */
+        byte[]? rowBits = haveDirtyRows ? _dirtyRowBits : null;
 
         /*
          * Consume the accumulated dirty range now that we have read it.  Pixels
@@ -260,7 +323,8 @@ internal class DlMemory
                 stridePixels,
                 fb,
                 dirtyRowFirst,
-                dirtyRowLast);
+                dirtyRowLast,
+                rowBits);
         }
         else
         {
@@ -271,7 +335,8 @@ internal class DlMemory
                 stridePixels,
                 fb,
                 dirtyRowFirst,
-                dirtyRowLast);
+                dirtyRowLast,
+                rowBits);
         }
 
         return new()
@@ -356,7 +421,8 @@ internal class DlMemory
         int destinationStride,
         Span<uint> destination,
         int dirtyRowFirst = 0,
-        int dirtyRowLast = int.MaxValue)
+        int dirtyRowLast = int.MaxValue,
+        byte[]? rowBits = null)
     {
         ArgumentOutOfRangeException.ThrowIfZero(source.Length);
         ArgumentOutOfRangeException.ThrowIfLessThan(sourceDiff.Length, source.Length);
@@ -375,75 +441,42 @@ internal class DlMemory
         int rowFirst = Math.Max(0, dirtyRowFirst);
         int rowLast  = Math.Min(totalRows, dirtyRowLast);
         int vectorLineLength = lineStride - (lineStride % Vector128<ushort>.Count);
-        bool hasDirtyRows = dirtyRowFirst > 0 || dirtyRowLast < int.MaxValue;
         for (int y = rowFirst; y < rowLast; y++)
         {
+            /*
+             * Skip rows the decoder never wrote this pass. rowBits is the per-row
+             * dirty bitset from MarkDirty; null means "diff every row in the
+             * window" (full-frame fallback). This is what keeps a cursor-top +
+             * caret-bottom update from converting the whole frame between them.
+             */
+            if (rowBits != null && (rowBits[y >> 3] & (byte)(1 << (y & 7))) == 0)
+                continue;
+
             int i = y * lineStride;
             ref uint lineDestinationRef = ref Unsafe.Add(ref destinationRef, y * destinationStride);
 
-            if (hasDirtyRows)
-            {
-                /*
-                 * We already know this row was written by the decoder (MarkDirty
-                 * confirmed it). Skip the per-pixel diff comparison and convert
-                 * unconditionally — faster for large dirty regions (e.g. a window
-                 * being dragged) where nearly every pixel changed anyway.
-                 */
-                CopyLine16Full(
-                    ref Unsafe.Add(ref sourceRef, i),
-                    ref lineDestinationRef,
-                    lineStride,
-                    vectorLineLength);
+            /*
+             * Run the diffing copy even on known-dirty rows: it gives tight X
+             * bounds (the decoder confirmed the ROW changed, not which columns)
+             * and keeps _frameBufferDiff16 consistent so later diff passes (and
+             * the 24-bit path) localize correctly instead of seeing stale data.
+             */
+            (int lineX1, int lineX2) = CopyLine16(
+                ref Unsafe.Add(ref sourceRef, i),
+                ref Unsafe.Add(ref sourceDiffRef, i),
+                ref lineDestinationRef,
+                lineStride,
+                vectorLineLength);
 
+            if (lineX1 >= 0)
+            {
+                if (lineX1 < x1) x1 = lineX1;
+                if (lineX2 > x2) x2 = lineX2;
                 if (y2 == 0) { y1 = y; y2 = y + 1; } else { y2 = y + 1; }
-                x1 = 0;
-                x2 = lineStride;
-            }
-            else
-            {
-                (int lineX1, int lineX2) = CopyLine16(
-                    ref Unsafe.Add(ref sourceRef, i),
-                    ref Unsafe.Add(ref sourceDiffRef, i),
-                    ref lineDestinationRef,
-                    lineStride,
-                    vectorLineLength);
-
-                if (lineX1 >= 0)
-                {
-                    if (lineX1 < x1) x1 = lineX1;
-                    if (lineX2 > x2) x2 = lineX2;
-                    if (y2 == 0) { y1 = y; y2 = y + 1; } else { y2 = y + 1; }
-                }
             }
         }
 
         return (x1, y1, x2, y2);
-    }
-
-    /*
-     * Unconditionally convert all pixels in one line, NO diff-buffer update.
-     * The diff buffer (_frameBufferDiff16) is only needed by CopyLine16's
-     * change-detection path, which is never taken when hasDirtyRows=true —
-     * and hasDirtyRows is always true after the MarkDirty accumulation fix.
-     * Dropping the sourceDiff write removes one full read-write of the
-     * _frameBufferDiff16 plane per converted row, cutting sync memory traffic
-     * by ~33% (source read + dest write remain; diff write is eliminated).
-     */
-    private static void CopyLine16Full(ref ushort source, ref uint destination, int lineLength, int vectorLineLength)
-    {
-        ref Vector256<uint> dst = ref Unsafe.As<uint, Vector256<uint>>(ref destination);
-        int x = 0;
-        for (; x < vectorLineLength; x += Vector128<ushort>.Count)
-        {
-            Vector128<ushort> pixels = Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref source, x));
-            ColorConvert.Rgb565LeToRgbx(pixels, ref Unsafe.Add(ref dst, x / Vector128<ushort>.Count));
-        }
-        if (lineLength != vectorLineLength)
-        {
-            nuint offset = (nuint)Vector128<ushort>.Count - (nuint)(lineLength - vectorLineLength);
-            Vector128<ushort> pixels = Unsafe.As<ushort, Vector128<ushort>>(ref Unsafe.Add(ref source, x - (int)offset));
-            ColorConvert.Rgb565LeToRgbx(pixels, ref Unsafe.As<uint, Vector256<uint>>(ref Unsafe.Add(ref destination, lineLength - Vector256<uint>.Count)));
-        }
     }
 
     private static (int X1, int X2) CopyLine16(ref ushort source, ref ushort sourceDiff, ref uint destination, int lineLength, int vectorLineLength)
@@ -536,7 +569,8 @@ internal class DlMemory
         int destinationStride,
         Span<uint> destination,
         int dirtyRowFirst = 0,
-        int dirtyRowLast = int.MaxValue)
+        int dirtyRowLast = int.MaxValue,
+        byte[]? rowBits = null)
     {
         // Combine the 16-bit plane (RGB565, providing MSBs of each channel) with the
         // 8-bit plane (RGB323, providing LSBs).  The per-channel merge is:
@@ -564,6 +598,17 @@ internal class DlMemory
 
         for (int y = rowFirst; y < rowLast; y++)
         {
+            /*
+             * Skip rows the decoder never wrote this pass (see CopyPixels16).
+             * Symmetric with the 16-bit path: the bitset localizes ROWS, the
+             * per-pixel diff below localizes COLUMNS (tight lineX1/lineX2) and
+             * keeps the diff buffer coherent. Do not add a no-diff "row is fully
+             * dirty" fast path on one plane only — that desyncs the diff buffer
+             * and reports full-width damage, which is the bug this replaced.
+             */
+            if (rowBits != null && (rowBits[y >> 3] & (byte)(1 << (y & 7))) == 0)
+                continue;
+
             int base16 = y * lineStride16;
             int base8 = y * lineStride8;
             int baseDst = y * destinationStride;
